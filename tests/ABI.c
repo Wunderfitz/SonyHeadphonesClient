@@ -280,9 +280,64 @@ static size_t pack_data_frame(
     );
 }
 
-static size_t pack_ack(unsigned char output[FRAME_BUFFER_CAPACITY])
+/* Sequence number of the last non-ACK frame the library actually put on the wire. */
+static int last_tx_sequence(MockTransport* transport, unsigned char* sequence)
 {
-    return pack_frame(MDR_DATA_TYPE_ACK, 1, NULL, 0, output);
+    int found = 0;
+    size_t index = 0;
+
+    while (index < transport->tx_size)
+    {
+        unsigned char unescaped[FRAME_BUFFER_CAPACITY];
+        size_t unescaped_size = 0;
+
+        if (transport->tx[index] != 0x3e)
+        {
+            ++index;
+            continue;
+        }
+        ++index;
+        while (index < transport->tx_size && transport->tx[index] != 0x3c)
+        {
+            unsigned char byte = transport->tx[index++];
+            if (byte == 0x3d && index < transport->tx_size)
+                byte = (unsigned char)(transport->tx[index++] + 0x10);
+            if (unescaped_size < FRAME_BUFFER_CAPACITY)
+                unescaped[unescaped_size++] = byte;
+        }
+        if (index < transport->tx_size)
+            ++index;
+        /* Our own acknowledgements are not something the device would acknowledge back. */
+        if (unescaped_size >= 2 && unescaped[0] != MDR_DATA_TYPE_ACK)
+        {
+            *sequence = unescaped[1];
+            found = 1;
+        }
+    }
+    return found;
+}
+
+/*
+ * Devices acknowledge a DATA frame by echoing the inverted sequence number of the frame
+ * they received, and libmdr only advances its transmit sequence once that acknowledgement
+ * arrives. Deriving the ACK from what was actually transmitted - rather than from a fixed
+ * constant - is what a device does, and keeps repeated exchanges honest about the toggle.
+ */
+static size_t pack_ack(MockTransport* transport, unsigned char output[FRAME_BUFFER_CAPACITY])
+{
+    unsigned char sequence = 0;
+
+    check(
+        last_tx_sequence(transport, &sequence),
+        "an outbound frame is available to acknowledge"
+    );
+    return pack_frame(
+        MDR_DATA_TYPE_ACK,
+        (unsigned char)(1 - sequence),
+        NULL,
+        0,
+        output
+    );
 }
 
 static int poll_event(MDRHeadphones* headphones, MDREvent* event, const char* message)
@@ -521,7 +576,8 @@ static void test_playback_actions(void)
             MDR_RESULT_OK,
             "playback action apply starts"
         );
-        ack_size = pack_ack(ack);
+        poll_event(session.headphones, &event, "playback action request flushes");
+        ack_size = pack_ack(&session.transport, ack);
         mock_load(&session.transport, ack, ack_size);
         poll_event(session.headphones, &event, "playback action ACK polls");
         poll_event(session.headphones, &event, "playback action completion polls");
@@ -549,6 +605,134 @@ static void test_playback_actions(void)
         mdrHeadphonesSetPlayback(session.headphones, &unsupported_status),
         MDR_RESULT_ERROR_NOT_SUPPORTED,
         "playback status is not misrepresented as a staged volume change"
+    );
+    session_close(&session);
+}
+
+/*
+ * Devices may push data before we have negotiated a protocol family. There is no table
+ * to decode it against yet, so it is dropped - tearing the session down instead would
+ * lose the connection over a frame we simply arrived too early for.
+ */
+static void test_frames_before_protocol_info_are_not_fatal(void)
+{
+    Session session;
+    const unsigned char notification[] = {0xa9, 0x01};
+    unsigned char frame[FRAME_BUFFER_CAPACITY];
+    size_t frame_size;
+    MDRModel identity;
+    MDREvent event;
+
+    if (!session_open(&session))
+        return;
+
+    frame_size = pack_data_frame(
+        notification,
+        sizeof(notification),
+        0,
+        frame
+    );
+    mock_load(&session.transport, frame, frame_size);
+    poll_event(session.headphones, &event, "pre-handshake frame polls without failing");
+    check(
+        event == MDR_EVENT_UNHANDLED,
+        "pre-handshake frame is reported as unhandled"
+    );
+
+    /* The handshake still completes afterwards. */
+    select_v2(&session, "protocol info is still accepted after a dropped frame");
+    memset(&identity, 0, sizeof(identity));
+    check_result(
+        mdrHeadphonesGetModel(session.headphones, &identity),
+        MDR_RESULT_OK,
+        "identity is readable after a dropped pre-handshake frame"
+    );
+    check(identity.protocol_version == 2, "V2 is selected after a dropped frame");
+    session_close(&session);
+}
+
+/*
+ * Devices interleave unsolicited notifications and late responses into the exchange.
+ * None of that may influence the sequence number we transmit with: a frame repeating
+ * the sequence number of an already acknowledged one is dropped by the device as a
+ * duplicate, and the request is then answered by silence.
+ */
+static void test_transmit_sequence_ignores_inbound_frames(void)
+{
+    Session session;
+    const unsigned char notification[] = {0xfe};
+    unsigned char frame[FRAME_BUFFER_CAPACITY];
+    unsigned char ack[FRAME_BUFFER_CAPACITY];
+    size_t frame_size;
+    size_t ack_size;
+    unsigned char first_sequence = 0;
+    unsigned char second_sequence = 0;
+    MDRPlaybackCommand command;
+    MDREvent event;
+
+    if (!session_open(&session))
+        return;
+    select_v2(&session, "V2 protocol is selected for sequence tracking");
+
+    memset(&command, 0, sizeof(command));
+    command.action = MDR_PLAYBACK_PLAY;
+    check_result(
+        mdrHeadphonesPlayback(session.headphones, &command),
+        MDR_RESULT_OK,
+        "first action stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "first apply starts"
+    );
+    poll_event(session.headphones, &event, "first request flushes");
+    check(
+        last_tx_sequence(&session.transport, &first_sequence),
+        "first request was transmitted"
+    );
+
+    ack_size = pack_ack(&session.transport, ack);
+    mock_load(&session.transport, ack, ack_size);
+    poll_event(session.headphones, &event, "first apply ACK polls");
+    poll_event(session.headphones, &event, "first apply completion polls");
+    check(event == MDR_EVENT_APPLY_COMPLETE, "first apply completes");
+
+    /*
+     * A frame arriving after the acknowledgement - a lagging response, or a notification
+     * the device pushed on its own - carrying the sequence number the acknowledged frame
+     * used. Adopting it would make the next request look like a retransmission.
+     */
+    frame_size = pack_data_frame(
+        notification,
+        sizeof(notification),
+        first_sequence,
+        frame
+    );
+    mock_load(&session.transport, frame, frame_size);
+    poll_event(session.headphones, &event, "late inbound frame polls");
+    check(event == MDR_EVENT_UNHANDLED, "late inbound frame is reported, not fatal");
+
+    memset(&command, 0, sizeof(command));
+    command.action = MDR_PLAYBACK_NEXT;
+    check_result(
+        mdrHeadphonesPlayback(session.headphones, &command),
+        MDR_RESULT_OK,
+        "second action stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "second apply starts"
+    );
+    poll_event(session.headphones, &event, "second request flushes");
+    check(
+        last_tx_sequence(&session.transport, &second_sequence),
+        "second request was transmitted"
+    );
+    check(
+        second_sequence != first_sequence,
+        "the next request does not repeat the sequence number of an acknowledged frame"
     );
     session_close(&session);
 }
@@ -609,7 +793,8 @@ static void test_v2_bootstrap(void)
         MDR_RESULT_OK,
         "automatic initialization starts"
     );
-    frame_size = pack_ack(frame);
+    poll_event(session.headphones, &event, "protocol-info request flushes");
+    frame_size = pack_ack(&session.transport, frame);
     mock_load(&session.transport, frame, frame_size);
     poll_event(session.headphones, &event, "protocol-info request ACK polls");
 
@@ -680,7 +865,8 @@ static void test_newer_staging_survives_apply(void)
         "newer playback value stages during apply"
     );
 
-    ack_size = pack_ack(ack);
+    poll_event(session.headphones, &ack_event, "apply request flushes");
+    ack_size = pack_ack(&session.transport, ack);
     mock_load(&session.transport, ack, ack_size);
     poll_event(session.headphones, &ack_event, "apply ACK polls");
     poll_event(session.headphones, &completion, "apply completion polls");
@@ -714,6 +900,8 @@ int main(void)
     test_committed_state_staging();
     test_playback_actions();
     test_poll_events();
+    test_frames_before_protocol_info_are_not_fatal();
+    test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();
 

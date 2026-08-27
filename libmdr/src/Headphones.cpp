@@ -175,7 +175,10 @@ namespace mdr
         bool awaitAck
     )
     {
-        SendCommandImpl(payload, type, sequence);
+        // The debugger drives the envelope itself; adopt its sequence number so the
+        // acknowledgement is still recognized and the counter stays in step afterwards.
+        mTxSeqNumber = static_cast<MDRCommandSeqNumber>(sequence & 1u);
+        SendCommandImpl(payload, type, mTxSeqNumber);
         if (awaitAck)
         {
             const int result = co_await Await(AWAIT_ACK);
@@ -331,7 +334,6 @@ namespace mdr
     int MDRHeadphones::Handle(Span<const UInt8> command, MDRDataType type, MDRCommandSeqNumber seq)
     {
         using enum MDRDataType;
-        mSeqNumber = seq;
         switch (type)
         {
         case ACK:
@@ -343,9 +345,14 @@ namespace mdr
                 command.front() == static_cast<UInt8>(v2::t1::Command::CONNECT_RET_PROTOCOL_INFO))
                 return HandleProtocolInfo(command);
             if (mProtocolFamily == ProtocolFamily::UNKNOWN)
-                return SetLastError(
-                    MDR_RESULT_ERROR_MALFORMED_PAYLOAD,
-                    "Received MDR Table 1 data before CONNECT_RET_PROTOCOL_INFO");
+            {
+                // Devices may push notifications before we have negotiated a protocol family.
+                // We have no table to decode them against yet, so drop them and let the
+                // AWAIT_PROTOCOL_INFO timeout decide whether the handshake really failed.
+                MDR_LOG_DEBUG("Dropping MDR Table 1 command {:X} received before CONNECT_RET_PROTOCOL_INFO",
+                              command.empty() ? 0 : command.front());
+                return MDR_EVENT_UNHANDLED;
+            }
             switch (mProtocolFamily)
             {
             case ProtocolFamily::V1: return HandleCommandV1T1(command, seq);
@@ -355,9 +362,12 @@ namespace mdr
         case DATA_MDR_NO2:
             SendACK(seq);
             if (mProtocolFamily == ProtocolFamily::UNKNOWN)
-                return SetLastError(
-                    MDR_RESULT_ERROR_MALFORMED_PAYLOAD,
-                    "Received MDR Table 2 data before CONNECT_RET_PROTOCOL_INFO");
+            {
+                // See the Table 1 case above.
+                MDR_LOG_DEBUG("Dropping MDR Table 2 command {:X} received before CONNECT_RET_PROTOCOL_INFO",
+                              command.empty() ? 0 : command.front());
+                return MDR_EVENT_UNHANDLED;
+            }
             switch (mProtocolFamily)
             {
             case ProtocolFamily::V1: return HandleCommandV1T2(command, seq);
@@ -463,8 +473,19 @@ namespace mdr
         SendCommandImpl({}, MDRDataType::ACK, 1 - seq);
     }
 
-    void MDRHeadphones::HandleAck(MDRCommandSeqNumber)
+    void MDRHeadphones::HandleAck(MDRCommandSeqNumber seq)
     {
+        // Devices acknowledge a DATA frame by echoing the inverted sequence number, the same
+        // convention @ref SendACK follows. Anything else acknowledges a frame we are no longer
+        // waiting on - a duplicate, or one the device re-sent late - and must not satisfy the
+        // pending await, or we would advance while our actual frame is still outstanding.
+        const auto expected = static_cast<MDRCommandSeqNumber>(1 - mTxSeqNumber);
+        if (seq != expected)
+        {
+            MDR_LOG_DEBUG("Ignoring stale ACK seq {} (awaiting {})", seq, expected);
+            return;
+        }
+        mTxSeqNumber = expected;
         Awake(AWAIT_ACK);
     }
 }

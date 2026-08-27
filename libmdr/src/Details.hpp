@@ -479,7 +479,12 @@ namespace mdr
          * send path. This is an internal C++ developer API, not part of the C ABI.
          */
         MDRTask RequestDebugCommand(MDRBuffer payload, MDRDataType type, MDRCommandSeqNumber sequence, bool awaitAck);
-        [[nodiscard]] MDRCommandSeqNumber CurrentSequenceNumber() const noexcept { return mSeqNumber; }
+        /**
+         * @brief Sequence number the next transmitted DATA frame will carry.
+         * @note  This is purely a transmit-side counter. It is deliberately unrelated to
+         *        the sequence numbers of inbound frames - see @ref mTxSeqNumber.
+         */
+        [[nodiscard]] MDRCommandSeqNumber CurrentSequenceNumber() const noexcept { return mTxSeqNumber; }
 
         MDRTask RequestInitV1();
         MDRTask RequestSyncV1();
@@ -531,7 +536,20 @@ namespace mdr
         MDRPacketCallback mPacketCallback{};
         void* mPacketCallbackUserData{};
         Deque<UInt8> mRecvBuf, mSendBuf;
-        MDRCommandSeqNumber mSeqNumber{0};
+        /**
+         * @brief Sequence number carried by the DATA frames we transmit, toggled between 0 and 1.
+         *
+         * MDR devices use this to tell a fresh request apart from a retransmission: a frame
+         * repeating the sequence number of an already acknowledged one is silently dropped as
+         * a duplicate. So this only advances once the device has acknowledged the frame that
+         * used it (@ref HandleAck), which is also what lets the retry loop in
+         * @ref SendCommandACK re-send the identical frame and have it accepted.
+         *
+         * It must NOT be derived from inbound frames. Devices are free to interleave
+         * unsolicited notifications and late responses into the exchange, and letting those
+         * drive the transmit counter desynchronizes us from the device.
+         */
+        MDRCommandSeqNumber mTxSeqNumber{0};
 
         MDRTask mTask;
         Array<Awaiter, AWAIT_NUM_TYPES> mAwaiters{};
@@ -577,7 +595,7 @@ namespace mdr
             const auto serialized = T::Serialize(command, buf, kMDRMaxPacketSize);
             if (!serialized)
                 return serialized.error;
-            SendCommandImpl({buf, buf + serialized.value}, type, mSeqNumber);
+            SendCommandImpl({buf, buf + serialized.value}, type, mTxSeqNumber);
             return MDR_RESULT_OK;
         }
 

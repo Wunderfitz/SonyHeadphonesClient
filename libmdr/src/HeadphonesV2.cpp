@@ -238,7 +238,7 @@ namespace mdr
             static_cast<UInt8>(t1::Command::LOG_SET_STATUS),
             0x01, 0x00
         };
-        SendCommandImpl(kLogSetStatusCommand, MDRDataType::DATA_MDR, mSeqNumber);
+        SendCommandImpl(kLogSetStatusCommand, MDRDataType::DATA_MDR, mTxSeqNumber);
         co_await Await(AWAIT_ACK);
         mNeutralInitialized = true;
         co_return MDR_EVENT_INITIALIZE_COMPLETE;
