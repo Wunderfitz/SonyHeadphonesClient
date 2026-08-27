@@ -1478,6 +1478,15 @@ void DrawDeviceControlsSound()
             MDR_EQ_CLEAR, MDR_EQ_HARD, MDR_EQ_SOFT, MDR_EQ_GAMING, MDR_EQ_FPS_1, MDR_EQ_FPS_2,
             MDR_EQ_FPS_3, MDR_EQ_CUSTOM, MDR_EQ_USER_1, MDR_EQ_USER_2, MDR_EQ_USER_3, MDR_EQ_USER_4,
             MDR_EQ_USER_5};
+        // Devices switch these off while a listening mode is active and say so; without
+        // that, the controls would look live while the device ignores every change.
+        const bool equalizerUsable =
+            !gState.mEqualizerAvailable || gState.mEqualizer.available != MDR_FALSE;
+        const bool dseeUsable =
+            !gState.mEqualizerAvailable || gState.mEqualizer.dsee_available != MDR_FALSE;
+        if (!equalizerUsable || !dseeUsable)
+            ImGui::TextDisabled("Unavailable while a listening mode other than Standard is active.");
+        ImGui::BeginDisabled(!equalizerUsable);
         changed |= ImComboBoxItems(
             "Preset", std::span{kSelections}, gState.mEqualizer.preset, FormatEqualizerPreset);
         if (ImEqualizer(gState.mEqualizerBands))
@@ -1490,8 +1499,9 @@ void DrawDeviceControlsSound()
             if (ImGui::SliderInt("##", &clearBass, -10, 10))
                 gState.mEqualizer.clear_bass = static_cast<int8_t>(clearBass), changed = true;
         }
+        ImGui::EndDisabled();
         ImGui::SeparatorText("DSEE");
-        ImGui::BeginDisabled(!FeatureAvailable(MDR_FEATURE_DSEE));
+        ImGui::BeginDisabled(!FeatureAvailable(MDR_FEATURE_DSEE) || !dseeUsable);
         if (ImGui::RadioButton("Off", gState.mEqualizer.dsee_enabled == MDR_FALSE))
             gState.mEqualizer.dsee_enabled = MDR_FALSE, changed = true;
         if (ImGui::RadioButton("On (Auto)", gState.mEqualizer.dsee_enabled != MDR_FALSE))

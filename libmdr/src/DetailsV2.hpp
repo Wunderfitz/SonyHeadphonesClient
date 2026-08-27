@@ -93,7 +93,8 @@ namespace mdr
         v2::t1::PlaybackStatus mPlayPause{};
 
         v2::t1::UpscalingType mUpscalingType{};
-        bool mUpscalingAvailable{};
+        // Available until the device reports otherwise - not every device ever does.
+        bool mUpscalingAvailable{true};
 
         struct GsCapability
         {
@@ -131,7 +132,7 @@ namespace mdr
         MDRProperty<v2::t1::ModeOutTime> mSpeakToModeOutTime;
         UInt8 mSpeakToChatVoiceFocus{};
         MDRProperty<bool> mHeadGestureEnabled;
-        MDRProperty<bool> mEqAvailable;
+        MDRProperty<bool> mEqAvailable{true, true, true};
         MDRProperty<v2::t1::EqPresetId> mEqPresetId;
         MDRProperty<int> mEqClearBass;
         MDRProperty<Vector<int>> mEqConfig;

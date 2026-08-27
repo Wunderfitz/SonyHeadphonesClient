@@ -74,7 +74,8 @@ namespace mdr
         v1::t1::PlaybackStatus mPlayPause{};
 
         v1::t1::UpscalingType mUpscalingType{};
-        bool mUpscalingAvailable{};
+        // Available until the device reports otherwise - not every device ever does.
+        bool mUpscalingAvailable{true};
 
         Vector<v1::t1::AsCapabilityKey> mAssignableSettingsKeys;
 
@@ -109,7 +110,7 @@ namespace mdr
         MDRProperty<v1::t1::ModeOutTime> mSpeakToModeOutTime;
         v1::t1::CommonOnOffSettingValue mSpeakToChatVoiceFocus{v1::t1::CommonOnOffSettingValue::OFF};
         MDRProperty<bool> mHeadGestureEnabled;
-        MDRProperty<bool> mEqAvailable;
+        MDRProperty<bool> mEqAvailable{true, true, true};
         MDRProperty<v1::t1::EqPresetId> mEqPresetId;
         MDRProperty<int> mEqClearBass;
         MDRProperty<Vector<int>> mEqConfig;

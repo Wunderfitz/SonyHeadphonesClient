@@ -1662,7 +1662,9 @@ MDRResult mdrHeadphonesGetEqualizer(
             .clear_bass = static_cast<int8_t>(state.mEqClearBass.current),
             .band_count = static_cast<uint32_t>(state.mEqConfig.current.size()),
             .dsee_enabled = static_cast<MDRBoolean>(state.mUpscalingEnabled.current),
-            .dsee_type = from_protocol(state.mUpscalingType)
+            .dsee_type = from_protocol(state.mUpscalingType),
+            .available = static_cast<MDRBoolean>(state.mEqAvailable.current),
+            .dsee_available = static_cast<MDRBoolean>(state.mUpscalingAvailable)
         };
         return MDR_RESULT_OK;
     });
