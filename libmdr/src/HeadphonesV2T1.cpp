@@ -676,6 +676,42 @@ namespace mdr
             }
             return MDR_EVENT_UNHANDLED;
         }
+        case VOICE_CONTENTS:
+        {
+            if (self->mDetailsV2.mSupport.contains(t1::FunctionType::LISTENING_OPTION))
+            {
+                if (command == Command::AUDIO_NTFY_PARAM)
+                {
+                    Deserialize(AudioNotifyParamVoiceContents, res, cmd);
+                    self->mDetailsV2.mVoiceContentsEnabled.overwrite(res.onOffSettingValue == OnOffSettingValue::ON);
+                }
+                else
+                {
+                    Deserialize(AudioRetParamVoiceContents, res, cmd);
+                    self->mDetailsV2.mVoiceContentsEnabled.overwrite(res.onOffSettingValue == OnOffSettingValue::ON);
+                }
+                return MDR_EVENT_LISTENING_MODE_CHANGED;
+            }
+            return MDR_EVENT_UNHANDLED;
+        }
+        case SOUND_LEAKAGE_REDUCTION:
+        {
+            if (self->mDetailsV2.mSupport.contains(t1::FunctionType::LISTENING_OPTION))
+            {
+                if (command == Command::AUDIO_NTFY_PARAM)
+                {
+                    Deserialize(AudioNotifyParamSoundLeakageReduction, res, cmd);
+                    self->mDetailsV2.mSoundLeakageReductionEnabled.overwrite(res.onOffSettingValue == OnOffSettingValue::ON);
+                }
+                else
+                {
+                    Deserialize(AudioRetParamSoundLeakageReduction, res, cmd);
+                    self->mDetailsV2.mSoundLeakageReductionEnabled.overwrite(res.onOffSettingValue == OnOffSettingValue::ON);
+                }
+                return MDR_EVENT_LISTENING_MODE_CHANGED;
+            }
+            return MDR_EVENT_UNHANDLED;
+        }
         default:
             break;
         }

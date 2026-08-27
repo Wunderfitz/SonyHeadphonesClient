@@ -28,7 +28,9 @@ feature.
 | Touch Sensor Gesture                     | ✅      |
 | Power Off                                | ✅      |
 | DSEE (Upscaling)                         | ✅      |
-| Background Music Effect                  | ✅      |
+| Listening Mode: Ambient Background Music | ✅      |
+| Listening Mode: Voice Boost              | **?**  |
+| Listening Mode: Sound Leakage Reduction  | **?**  |
 | Bluetooth Connection Quality             | ✅      |
 | Cinema Upmix                             | ❌      |
 | Pause When Headphones Are Removed        | ❌      |
@@ -36,8 +38,6 @@ feature.
 | Head Gesture                             | ❌      |
 | Automatic Power Off                      | ❌      |
 | Adaptive Volume Control                  | **~**  |
-| Sound Leakage Reduction                  | **~**  |
-| Voice Contents                           | **~**  |
 | Quick Access                             | **~**  |
 | Auto Play                                | **~**  |
 | Link Auto Switch                         | **~**  |
@@ -48,11 +48,14 @@ Notes:
 - **NC/AMB, Speak to Chat, Head Gesture, Automatic Power Off**: the device advertises no
   corresponding function at all — it is an open-ear design with no noise cancelling.
   libmdr correctly sends no `NCASM` command during the whole session.
-- **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so it
-  implements only the background-music half. libmdr no longer asks for the other half; in
-  the capture above, taken before that gate existed, the request is acknowledged and then
-  never answered. The client still offers a Cinema option under Listening Mode, which this
-  device ignores.
+- **Listening modes** are one exclusive setting - at most one is active, and Standard means
+  none is. This device offers three of them (`BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE`,
+  `VOICE_CONTENTS`, `SOUND_LEAKAGE_REDUCTION`), matching what Sound Connect shows. Voice
+  Boost and Sound Leakage Reduction are implemented from Sony's own message tables but have
+  not been confirmed against the device, hence **?**.
+- **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so the
+  Cinema mode does not exist here and is no longer offered. In the capture above, taken
+  before the per-mode gating existed, the request is acknowledged and then never answered.
 - **Pause When Headphones Are Removed**: the device does not advertise
   `PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF`. libmdr no longer requests it; the
   capture above still shows the unconditional request, acknowledged and unanswered.

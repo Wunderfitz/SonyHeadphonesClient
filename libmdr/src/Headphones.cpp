@@ -1284,7 +1284,7 @@ MDRResult mdrHeadphonesGetFeature(
     if (!headphones || !outAvailability)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     // Keep the upper bound on the last MDR_FEATURE_* id, or newly added features read as invalid.
-    if (feature < MDR_FEATURE_IDENTITY || feature > MDR_FEATURE_SOURCE_SWITCH_CONTROL)
+    if (feature < MDR_FEATURE_IDENTITY || feature > MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     const auto& h = *Impl(headphones);
     if (!h.mInitialized)
@@ -1603,11 +1603,15 @@ MDRResult mdrHeadphonesGetListening(
         return MDR_RESULT_OK;
     }
     const auto& state = h.mDetailsV2;
-    const bool cinema = state.mUpmixCinemaEnabled.current;
-    const bool background = state.mBGMModeEnabled.current;
+    // At most one is on; if a device ever reports two, the first match wins over guessing.
+    const MDRListeningMode mode =
+        state.mBGMModeEnabled.current ? MDR_LISTENING_BACKGROUND_MUSIC :
+        state.mUpmixCinemaEnabled.current ? MDR_LISTENING_CINEMA :
+        state.mVoiceContentsEnabled.current ? MDR_LISTENING_VOICE_BOOST :
+        state.mSoundLeakageReductionEnabled.current ? MDR_LISTENING_SOUND_LEAKAGE_REDUCTION :
+        MDR_LISTENING_STANDARD;
     *outListening = {
-        .mode = cinema ? MDR_LISTENING_CINEMA :
-            background ? MDR_LISTENING_BACKGROUND_MUSIC : MDR_LISTENING_STANDARD,
+        .mode = mode,
         .background_room = from_protocol(state.mBGMModeRoomSize.current)
     };
     return MDR_RESULT_OK;
@@ -1615,21 +1619,32 @@ MDRResult mdrHeadphonesGetListening(
 
 MDRResult mdrHeadphonesSetListening(MDRHeadphones* headphones, const MDRListening* listening)
 {
-    if (!headphones || !listening || listening->mode > MDR_LISTENING_CINEMA)
+    if (!headphones || !listening || listening->mode > MDR_LISTENING_SOUND_LEAKAGE_REDUCTION)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     auto* h = Impl(headphones);
     if (h->mProtocolFamily != Headphones::ProtocolFamily::V2)
         return MDR_RESULT_ERROR_NOT_SUPPORTED;
     auto& state = h->mDetailsV2;
-    if (!state.mSupport.contains(mdr::v2::t1::FunctionType::LISTENING_OPTION))
+    static constexpr MDRFeature kModeFeatures[] = {
+        0, /* MDR_LISTENING_STANDARD is always reachable - it is every mode turned off */
+        MDR_FEATURE_LISTENING_BACKGROUND_MUSIC,
+        MDR_FEATURE_LISTENING_CINEMA,
+        MDR_FEATURE_LISTENING_VOICE_BOOST,
+        MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION
+    };
+    if (listening->mode != MDR_LISTENING_STANDARD &&
+        !SupportsFeature(state, kModeFeatures[listening->mode]))
         return MDR_RESULT_ERROR_NOT_SUPPORTED;
     auto room = state.mBGMModeRoomSize.desired;
     if (listening->background_room != MDR_ROOM_UNKNOWN && !to_protocol(listening->background_room, room))
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     if (listening->mode == MDR_LISTENING_BACKGROUND_MUSIC && listening->background_room == MDR_ROOM_UNKNOWN)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
+    // The modes are exclusive, so selecting one stages every other one off.
     state.mBGMModeEnabled.stage(listening->mode == MDR_LISTENING_BACKGROUND_MUSIC);
     state.mUpmixCinemaEnabled.stage(listening->mode == MDR_LISTENING_CINEMA);
+    state.mVoiceContentsEnabled.stage(listening->mode == MDR_LISTENING_VOICE_BOOST);
+    state.mSoundLeakageReductionEnabled.stage(listening->mode == MDR_LISTENING_SOUND_LEAKAGE_REDUCTION);
     state.mBGMModeRoomSize.stage(room);
     return MDR_RESULT_OK;
 }

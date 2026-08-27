@@ -122,6 +122,8 @@ namespace mdr
         MDRProperty<bool> mBGMModeEnabled;
         MDRProperty<v2::t1::RoomSize> mBGMModeRoomSize;
         MDRProperty<bool> mUpmixCinemaEnabled;
+        MDRProperty<bool> mVoiceContentsEnabled;
+        MDRProperty<bool> mSoundLeakageReductionEnabled;
         MDRProperty<bool> mAutoPauseEnabled;
         MDRProperty<v2::t1::Preset> mTouchFunctionLeft, mTouchFunctionRight;
         MDRProperty<bool> mSpeakToChatEnabled;
@@ -200,6 +202,16 @@ namespace mdr
                 T1::MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT_NOISE_ADAPTATION);
         case MDR_FEATURE_SPEAK_TO_CHAT: return state.mSupport.contains(T1::SMART_TALKING_MODE_TYPE2);
         case MDR_FEATURE_LISTENING_MODE: return state.mSupport.contains(T1::LISTENING_OPTION);
+        // Each mode is advertised on its own; LISTENING_OPTION only says they are exclusive.
+        case MDR_FEATURE_LISTENING_BACKGROUND_MUSIC:
+            return state.mSupport.contains(T1::LISTENING_OPTION) && state.mSupport.containsBGMMode();
+        case MDR_FEATURE_LISTENING_CINEMA:
+            return state.mSupport.contains(T1::LISTENING_OPTION) && state.mSupport.contains(T1::UPMIX_CINEMA);
+        case MDR_FEATURE_LISTENING_VOICE_BOOST:
+            return state.mSupport.contains(T1::LISTENING_OPTION) && state.mSupport.contains(T1::VOICE_CONTENTS);
+        case MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION:
+            return state.mSupport.contains(T1::LISTENING_OPTION) &&
+                state.mSupport.contains(T1::SOUND_LEAKAGE_REDUCTION);
         case MDR_FEATURE_EQUALIZER:
             return state.mSupport.contains(T1::PRESET_EQ) || state.mSupport.contains(T1::CUSTOM_EQ) ||
                 state.mSupport.contains(T1::PRESET_EQ_NON_CUSTOMIZABLE) ||
