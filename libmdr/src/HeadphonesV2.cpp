@@ -93,16 +93,15 @@ namespace mdr
         if (mSupport.contains(t1::FunctionType::CODEC_INDICATOR))
             SendCommandACK(t1::CommonGetStatus, { .type = t1::CommonInquiredType::AUDIO_CODEC });
 
-        /* Playback Metadata */
-        SendCommandACK(t1::GetPlayParam,
-                       { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
-
-        /* Playback Volume */
-        SendCommandACK(t1::GetPlayParam, { .type = t1::PlayInquiredType::MUSIC_VOLUME });
-
-        /* Play/Pause */
-        SendCommandACK(t1::GetPlayStatus,
-                       { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+        /* Playback Metadata, Volume, Play/Pause */
+        if (mSupport.contains(MDR_FEATURE_PLAYBACK_METADATA))
+        {
+            SendCommandACK(t1::GetPlayParam,
+                           { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+            SendCommandACK(t1::GetPlayParam, { .type = t1::PlayInquiredType::MUSIC_VOLUME });
+            SendCommandACK(t1::GetPlayStatus,
+                           { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+        }
 
         /* NC/AMB */
         if (mSupport.contains(
@@ -170,16 +169,24 @@ namespace mdr
             SendCommandACK(t1::SystemGetExtParam, {.type = t1::SystemInquiredType::SMART_TALKING_MODE_TYPE2});
         }
 
-        /* Listening Mode */
+        /* Listening Mode
+         * LISTENING_OPTION only says the device groups these under one setting. Each half is
+         * advertised on its own, and a device that implements just one of them acknowledges
+         * the other request and then never answers it. */
         if (mSupport.contains(t1::FunctionType::LISTENING_OPTION))
         {
-            SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::BGM_MODE_AND_ERRORCODE});
-            SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::UPMIX_CINEMA});
+            if (SupportsBGMMode())
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::BGM_MODE_AND_ERRORCODE});
+            if (mSupport.contains(t1::FunctionType::UPMIX_CINEMA))
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::UPMIX_CINEMA});
         }
 
         /* Equalizer */
-        SendCommandACK(t1::EqEbbGetStatus, {.type = t1::EqEbbInquiredType::PRESET_EQ});
-        SendCommandACK(t1::EqEbbGetParam);
+        if (mSupport.contains(MDR_FEATURE_EQUALIZER))
+        {
+            SendCommandACK(t1::EqEbbGetStatus, {.type = t1::EqEbbInquiredType::PRESET_EQ});
+            SendCommandACK(t1::EqEbbGetParam);
+        }
 
         /* Connection Quality */
         if (mSupport.contains(
@@ -217,10 +224,13 @@ namespace mdr
         }
 
         /* Pause when headphones are removed */
-        SendCommandACK(t1::SystemGetParam, {.type = t1::SystemInquiredType::PLAYBACK_CONTROL_BY_WEARING });
+        if (mSupport.contains(MDR_FEATURE_AUTO_PAUSE))
+            SendCommandACK(t1::SystemGetParam, {.type = t1::SystemInquiredType::PLAYBACK_CONTROL_BY_WEARING });
 
-        /* Voice Guidance */
-        if (mProtocol.hasTable2)
+        /* Voice Guidance
+         * These live in table 2, but having table 2 is not the same as having voice guidance -
+         * the commit path already gates on the function itself. */
+        if (mSupport.contains(MDR_FEATURE_VOICE_GUIDANCE))
         {
             // Enabled
             SendCommandACK(t2::VoiceGuidanceGetParam,
@@ -229,7 +239,8 @@ namespace mdr
                            MTK_TRANSFER_WO_DISCONNECTION_SUPPORT_LANGUAGE_SWITCH
                            });
             // Volume
-            SendCommandACK(t2::VoiceGuidanceGetParam, {.inquiredType = t2::VoiceGuidanceInquiredType::VOLUME});
+            if (mSupport.contains(MDR_FEATURE_VOICE_GUIDANCE_VOLUME))
+                SendCommandACK(t2::VoiceGuidanceGetParam, {.inquiredType = t2::VoiceGuidanceInquiredType::VOLUME});
         }
 
         /* LOG_SET_STATUS */
@@ -595,25 +606,31 @@ namespace mdr
             using namespace t1;
             if (mBGMModeEnabled.pending() || mBGMModeRoomSize.pending())
             {
-                AudioSetParamBGMMode res;
-                res.command = Command::AUDIO_SET_PARAM;
-                res.type = AudioInquiredType::BGM_MODE_AND_ERRORCODE;
-                res.onOffSettingValue = mBGMModeEnabled.submitted
-                    ? OnOffSettingValue::ON
-                    : OnOffSettingValue::OFF;
-                res.targetRoomSize = mBGMModeRoomSize.submitted;
-                SendCommandACK(AudioSetParamBGMMode, res);
+                if (SupportsBGMMode())
+                {
+                    AudioSetParamBGMMode res;
+                    res.command = Command::AUDIO_SET_PARAM;
+                    res.type = AudioInquiredType::BGM_MODE_AND_ERRORCODE;
+                    res.onOffSettingValue = mBGMModeEnabled.submitted
+                        ? OnOffSettingValue::ON
+                        : OnOffSettingValue::OFF;
+                    res.targetRoomSize = mBGMModeRoomSize.submitted;
+                    SendCommandACK(AudioSetParamBGMMode, res);
+                }
                 mBGMModeEnabled.commit(), mBGMModeRoomSize.commit();
                 MDR_LOG("S/W BGM BGM {} ROOM {} UPMIX {}", mBGMModeEnabled.desired, mBGMModeRoomSize.desired, mUpmixCinemaEnabled.desired);
             }
             if (mUpmixCinemaEnabled.pending())
             {
-                AudioSetParamUpmixCinema res;
-                res.command = Command::AUDIO_SET_PARAM;
-                res.onOffSettingValue = mUpmixCinemaEnabled.submitted
-                    ? OnOffSettingValue::ON
-                    : OnOffSettingValue::OFF;
-                SendCommandACK(AudioSetParamUpmixCinema, res);
+                if (mSupport.contains(FunctionType::UPMIX_CINEMA))
+                {
+                    AudioSetParamUpmixCinema res;
+                    res.command = Command::AUDIO_SET_PARAM;
+                    res.onOffSettingValue = mUpmixCinemaEnabled.submitted
+                        ? OnOffSettingValue::ON
+                        : OnOffSettingValue::OFF;
+                    SendCommandACK(AudioSetParamUpmixCinema, res);
+                }
                 mUpmixCinemaEnabled.commit();
                 MDR_LOG("S/W CNE BGM {} ROOM {} UPMIX {}", mBGMModeEnabled.desired, mBGMModeRoomSize.desired, mUpmixCinemaEnabled.desired);
             }

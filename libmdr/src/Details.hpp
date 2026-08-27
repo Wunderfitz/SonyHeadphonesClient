@@ -345,6 +345,19 @@ namespace mdr
         void RefreshNeutralFeaturesV1();
         void RefreshNeutralFeaturesV2();
 
+        /**
+         * @brief Whether the device advertises any background-music listening mode.
+         * @note  There is no neutral feature for this: @ref MDR_FEATURE_LISTENING_MODE covers
+         *        the grouping the device presents, not the individual modes underneath it.
+         */
+        [[nodiscard]] bool SupportsBGMMode() const
+        {
+            using F = v2::t1::FunctionType;
+            return mSupport.contains(F::BGM_MODE_SMALL_MIDDLE_LARGE) ||
+                mSupport.contains(F::BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE) ||
+                mSupport.contains(F::BGM_MODE_CANT_BE_USED_WITH_LEA_CONNECTION);
+        }
+
         String mUniqueId; // MAC Address
         String mFWVersion;
         String mModelName;

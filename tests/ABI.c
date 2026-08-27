@@ -280,37 +280,65 @@ static size_t pack_data_frame(
     );
 }
 
+typedef struct TxFrame
+{
+    unsigned char type;
+    unsigned char sequence;
+    unsigned char payload[FRAME_BUFFER_CAPACITY];
+    size_t payload_size;
+} TxFrame;
+
+/*
+ * Decodes the frame beginning at *offset and advances *offset past it, so a caller can walk
+ * everything the library has transmitted - to answer it the way a device would, or to assert
+ * on what was asked for. Returns 0 at the end of the stream, or on a frame still in flight.
+ */
+static int next_tx_frame(MockTransport* transport, size_t* offset, TxFrame* frame)
+{
+    unsigned char unescaped[FRAME_BUFFER_CAPACITY];
+    size_t unescaped_size = 0;
+    size_t index = *offset;
+
+    while (index < transport->tx_size && transport->tx[index] != 0x3e)
+        ++index;
+    if (index == transport->tx_size)
+        return 0;
+    ++index;
+    while (index < transport->tx_size && transport->tx[index] != 0x3c)
+    {
+        unsigned char byte = transport->tx[index++];
+        if (byte == 0x3d && index < transport->tx_size)
+            byte = (unsigned char)(transport->tx[index++] + 0x10);
+        if (unescaped_size < FRAME_BUFFER_CAPACITY)
+            unescaped[unescaped_size++] = byte;
+    }
+    if (index == transport->tx_size)
+        return 0;
+    ++index;
+    /* type, sequence, four size bytes, payload, checksum */
+    if (unescaped_size < 7)
+        return 0;
+    *offset = index;
+    frame->type = unescaped[0];
+    frame->sequence = unescaped[1];
+    frame->payload_size = unescaped_size - 7;
+    memcpy(frame->payload, unescaped + 6, frame->payload_size);
+    return 1;
+}
+
 /* Sequence number of the last non-ACK frame the library actually put on the wire. */
 static int last_tx_sequence(MockTransport* transport, unsigned char* sequence)
 {
+    TxFrame frame;
+    size_t offset = 0;
     int found = 0;
-    size_t index = 0;
 
-    while (index < transport->tx_size)
+    while (next_tx_frame(transport, &offset, &frame))
     {
-        unsigned char unescaped[FRAME_BUFFER_CAPACITY];
-        size_t unescaped_size = 0;
-
-        if (transport->tx[index] != 0x3e)
-        {
-            ++index;
-            continue;
-        }
-        ++index;
-        while (index < transport->tx_size && transport->tx[index] != 0x3c)
-        {
-            unsigned char byte = transport->tx[index++];
-            if (byte == 0x3d && index < transport->tx_size)
-                byte = (unsigned char)(transport->tx[index++] + 0x10);
-            if (unescaped_size < FRAME_BUFFER_CAPACITY)
-                unescaped[unescaped_size++] = byte;
-        }
-        if (index < transport->tx_size)
-            ++index;
         /* Our own acknowledgements are not something the device would acknowledge back. */
-        if (unescaped_size >= 2 && unescaped[0] != MDR_DATA_TYPE_ACK)
+        if (frame.type != MDR_DATA_TYPE_ACK)
         {
-            *sequence = unescaped[1];
+            *sequence = frame.sequence;
             found = 1;
         }
     }
@@ -367,6 +395,11 @@ static char* get_text(MDRHeadphones* headphones, MDRText text)
 
 static const unsigned char k_v2_protocol_info[] = {
     0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01
+};
+
+/* As above, but with the table 2 support byte set to ENABLE rather than DISABLE. */
+static const unsigned char k_v2_protocol_info_both_tables[] = {
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00
 };
 
 static void select_v2(Session* session, const char* message)
@@ -737,6 +770,214 @@ static void test_transmit_sequence_ignores_inbound_frames(void)
     session_close(&session);
 }
 
+/*
+ * A device that understands the framing and acknowledges everything, but answers only the
+ * two requests initialization cannot proceed without. Every other request is accepted and
+ * dropped, which is what a real device does with a command it does not implement - so what
+ * matters is that libmdr never asks for anything the advertised function list rules out.
+ */
+enum { MDR_DATA_TYPE_DATA_MDR_NO2 = 14, REQUEST_LOG_CAPACITY = 128 };
+
+typedef struct RequestLog
+{
+    unsigned char table;
+    unsigned char command;
+    unsigned char inquired;
+    int has_inquired;
+} RequestLog;
+
+typedef struct Device
+{
+    MockTransport* transport;
+    size_t tx_cursor;
+    unsigned char sequence;
+    const unsigned char* table1;
+    size_t table1_size;
+    const unsigned char* table2;
+    size_t table2_size;
+    RequestLog log[REQUEST_LOG_CAPACITY];
+    size_t log_size;
+} Device;
+
+static void device_send(Device* device, unsigned char type, const unsigned char* payload, size_t payload_size)
+{
+    unsigned char frame[FRAME_BUFFER_CAPACITY];
+    const size_t size = pack_frame(type, device->sequence, payload, payload_size, frame);
+
+    device->sequence = (unsigned char)(1 - device->sequence);
+    mock_append(device->transport, frame, size);
+}
+
+/* Acknowledge and, where the handshake requires it, answer everything transmitted so far. */
+static void device_pump(Device* device)
+{
+    TxFrame frame;
+
+    while (next_tx_frame(device->transport, &device->tx_cursor, &frame))
+    {
+        unsigned char ack[FRAME_BUFFER_CAPACITY];
+        size_t ack_size;
+        unsigned char table;
+
+        if (frame.type == MDR_DATA_TYPE_ACK || frame.payload_size == 0)
+            continue;
+        table = (unsigned char)(frame.type == MDR_DATA_TYPE_DATA_MDR_NO2 ? 2 : 1);
+
+        if (device->log_size < REQUEST_LOG_CAPACITY)
+        {
+            RequestLog* entry = &device->log[device->log_size++];
+            entry->table = table;
+            entry->command = frame.payload[0];
+            entry->has_inquired = frame.payload_size > 1;
+            entry->inquired = entry->has_inquired ? frame.payload[1] : 0;
+        }
+
+        ack_size = pack_frame(MDR_DATA_TYPE_ACK, (unsigned char)(1 - frame.sequence), NULL, 0, ack);
+        mock_append(device->transport, ack, ack_size);
+
+        if (table == 1 && frame.payload[0] == 0x00) /* CONNECT_GET_PROTOCOL_INFO */
+        {
+            device_send(
+                device,
+                MDR_DATA_TYPE_DATA_MDR,
+                k_v2_protocol_info_both_tables,
+                sizeof(k_v2_protocol_info_both_tables)
+            );
+        }
+        else if (frame.payload[0] == 0x06) /* CONNECT_GET_SUPPORT_FUNCTION */
+        {
+            if (table == 1)
+                device_send(device, MDR_DATA_TYPE_DATA_MDR, device->table1, device->table1_size);
+            else
+                device_send(device, MDR_DATA_TYPE_DATA_MDR_NO2, device->table2, device->table2_size);
+        }
+    }
+}
+
+static int device_requested(const Device* device, unsigned char table, unsigned char command, int inquired)
+{
+    size_t index;
+
+    for (index = 0; index < device->log_size; ++index)
+    {
+        const RequestLog* entry = &device->log[index];
+        if (entry->table != table || entry->command != command)
+            continue;
+        if (inquired < 0 || (entry->has_inquired && entry->inquired == (unsigned char)inquired))
+            return 1;
+    }
+    return 0;
+}
+
+/* Runs initialization to completion against `device`, or reports why it could not. */
+static void device_run_init(Session* session, Device* device)
+{
+    int iteration;
+
+    check_result(
+        mdrHeadphonesRequestInit(session->headphones),
+        MDR_RESULT_OK,
+        "initialization starts"
+    );
+    for (iteration = 0; iteration < 4096; ++iteration)
+    {
+        MDREvent event = MDR_EVENT_NONE;
+        if (mdrHeadphonesPoll(session->headphones, &event) != MDR_RESULT_OK)
+        {
+            check(0, "initialization polls without failing");
+            return;
+        }
+        device_pump(device);
+        if (event == MDR_EVENT_INITIALIZE_COMPLETE)
+            return;
+    }
+    check(0, "initialization completes");
+}
+
+/*
+ * Requests for functions the device does not advertise are worse than useless: the device
+ * acknowledges and ignores them, so the state never arrives, and a device that ignores
+ * unknown commands outright would stall initialization until the retry budget runs out.
+ */
+static void test_init_skips_unadvertised_functions(void)
+{
+    /* POWER_OFF and LR_BATTERY_LEVEL_WITH_THRESHOLD only. */
+    static const unsigned char table1[] = {0x07, 0x00, 0x02, 0x23, 0xff, 0x29, 0xff};
+    /* SAFE_LISTENING_TWS_1 only - table 2 is present, but carries no voice guidance. */
+    static const unsigned char table2[] = {0x07, 0x00, 0x01, 0x51, 0xff};
+
+    Session session;
+    Device device;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    check(!device_requested(&device, 1, 0x52, -1), "no EQEBB_GET_STATUS without an equalizer");
+    check(!device_requested(&device, 1, 0x56, -1), "no EQEBB_GET_PARAM without an equalizer");
+    check(!device_requested(&device, 1, 0xa6, -1), "no PLAY_GET_PARAM without a playback controller");
+    check(!device_requested(&device, 1, 0xa2, -1), "no PLAY_GET_STATUS without a playback controller");
+    check(!device_requested(&device, 1, 0xf6, 0x01), "no PLAYBACK_CONTROL_BY_WEARING without wearing control");
+    check(!device_requested(&device, 1, 0xe6, 0x09), "no BGM_MODE without a listening option");
+    check(!device_requested(&device, 1, 0xe6, 0x04), "no UPMIX_CINEMA without a listening option");
+    check(!device_requested(&device, 2, 0x46, -1), "no VOICE_GUIDANCE_GET_PARAM on a table 2 device without it");
+    session_close(&session);
+}
+
+/*
+ * The mirror image, plus the case that motivated splitting the listening-mode gate:
+ * LISTENING_OPTION with only the background-music half implemented.
+ */
+static void test_init_requests_advertised_functions(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x06,
+        0x50, 0xff, /* PRESET_EQ */
+        0xa1, 0xff, /* PLAYBACK_CONTROLLER_WITH_CALL_VOLUME_ADJUSTMENT */
+        0xf1, 0xff, /* PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF */
+        0xe6, 0xff, /* LISTENING_OPTION */
+        0xeb, 0xff, /* BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE - but no UPMIX_CINEMA */
+        0x23, 0xff  /* POWER_OFF */
+    };
+    static const unsigned char table2[] = {
+        0x07, 0x00, 0x01,
+        0x42, 0xff /* VOICE_GUIDANCE_..._SUPPORT_LANGUAGE_SWITCH_AND_VOLUME_ADJUSTMENT */
+    };
+
+    Session session;
+    Device device;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    check(device_requested(&device, 1, 0x52, -1), "EQEBB_GET_STATUS for an advertised equalizer");
+    check(device_requested(&device, 1, 0xa6, -1), "PLAY_GET_PARAM for an advertised playback controller");
+    check(device_requested(&device, 1, 0xa2, -1), "PLAY_GET_STATUS for an advertised playback controller");
+    check(device_requested(&device, 1, 0xf6, 0x01), "PLAYBACK_CONTROL_BY_WEARING for advertised wearing control");
+    check(device_requested(&device, 1, 0xe6, 0x09), "BGM_MODE for an advertised background-music mode");
+    check(device_requested(&device, 2, 0x46, -1), "VOICE_GUIDANCE_GET_PARAM for advertised voice guidance");
+    check(
+        !device_requested(&device, 1, 0xe6, 0x04),
+        "no UPMIX_CINEMA when only the background-music half of LISTENING_OPTION is advertised"
+    );
+    session_close(&session);
+}
+
 static void test_poll_events(void)
 {
     Session session;
@@ -901,6 +1142,8 @@ int main(void)
     test_playback_actions();
     test_poll_events();
     test_frames_before_protocol_info_are_not_fatal();
+    test_init_skips_unadvertised_functions();
+    test_init_requests_advertised_functions();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();
