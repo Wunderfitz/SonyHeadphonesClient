@@ -3,8 +3,11 @@ WF-LC900 (LinkBuds Clip)
 
 Tested on firmware 2.0.3, MDR V2 (protocol `0x03003015`), with both command tables
 enabled. The device reports its model name as `LinkBuds Clip` and its series as
-`ModelSeries::LINK_BUDS` (`0x60`). Packet capture:
-[`tests/WF-LC900-2.0.3/`](../../tests/WF-LC900-2.0.3/).
+`ModelSeries::LINK_BUDS` (`0x60`). Packet captures:
+[`tests/WF-LC900-2.0.3/`](../../tests/WF-LC900-2.0.3/) (initialization and sync) and
+[`tests/WF-LC900-2.0.3-listening/`](../../tests/WF-LC900-2.0.3-listening/) (every listening
+mode and every background-music distance). Paired device names, their addresses and track
+metadata are replaced with placeholders in both.
 
 **NOTE:** **✅**: Supported, ❌: Unsupported, **?**: Untested, **~**: Supported officially, pending implementation.
 
@@ -29,8 +32,8 @@ feature.
 | Power Off                                | ✅      |
 | DSEE (Upscaling)                         | ✅      |
 | Listening Mode: Ambient Background Music | ✅      |
-| Listening Mode: Voice Boost              | **?**  |
-| Listening Mode: Sound Leakage Reduction  | **?**  |
+| Listening Mode: Voice Boost              | ✅      |
+| Listening Mode: Sound Leakage Reduction  | ✅      |
 | Bluetooth Connection Quality             | ✅      |
 | Cinema Upmix                             | ❌      |
 | Pause When Headphones Are Removed        | ❌      |
@@ -50,9 +53,16 @@ Notes:
   libmdr correctly sends no `NCASM` command during the whole session.
 - **Listening modes** are one exclusive setting - at most one is active, and Standard means
   none is. This device offers three of them (`BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE`,
-  `VOICE_CONTENTS`, `SOUND_LEAKAGE_REDUCTION`), matching what Sound Connect shows. Voice
-  Boost and Sound Leakage Reduction are implemented from Sony's own message tables but have
-  not been confirmed against the device, hence **?**.
+  `VOICE_CONTENTS`, `SOUND_LEAKAGE_REDUCTION`), matching the four options Sound Connect
+  shows. All three, and all three background-music distances, are confirmed against the
+  device in the listening capture. The device confirms each change by notifying the state of
+  every mode, not just the one that changed.
+- **The equalizer and DSEE are switched off while any listening mode is active.** The device
+  reports this with `EQEBB_NTFY_STATUS PRESET_EQ DISABLE` and
+  `AUDIO_NTFY_STATUS UPSCALING DISABLE`, and reports them available again on Standard. Both
+  reach the client through `MDREqualizer.available` and `MDREqualizer.dsee_available`, which
+  are about what the device will act on right now - `MDR_FEATURE_EQUALIZER` and
+  `MDR_FEATURE_DSEE` stay set throughout, because the hardware still has both.
 - **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so the
   Cinema mode does not exist here and is no longer offered. In the capture above, taken
   before the per-mode gating existed, the request is acknowledged and then never answered.
