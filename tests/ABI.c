@@ -1111,6 +1111,91 @@ static void test_listening_modes(void)
     session_close(&session);
 }
 
+/*
+ * A device switches the equalizer and DSEE off while a listening mode is active and reports
+ * it. Without carrying that out to the caller, the controls stay live while every change is
+ * ignored, so the two availability flags have to follow the device rather than the support
+ * list - which keeps saying the device has an equalizer the whole time.
+ */
+static void test_equalizer_availability_follows_the_device(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x04,
+        0xe6, 0xff, /* LISTENING_OPTION */
+        0xeb, 0xff, /* BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE */
+        0x50, 0xff, /* PRESET_EQ */
+        0xe2, 0xff  /* UPSCALING_AUTO_OFF */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+    /* EQEBB_NTFY_STATUS PRESET_EQ, and AUDIO_NTFY_STATUS UPSCALING. 0x00 enables. */
+    static const unsigned char eq_off[] = {0x55, 0x00, 0x01};
+    static const unsigned char eq_on[] = {0x55, 0x00, 0x00};
+    static const unsigned char dsee_off[] = {0xe5, 0x01, 0x01};
+    static const unsigned char dsee_on[] = {0xe5, 0x01, 0x00};
+
+    Session session;
+    Device device;
+    MDREqualizer equalizer;
+    MDRFeatureAvailability availability_scratch = MDR_AVAILABILITY_UNKNOWN;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    /* Nothing has been said either way yet, so both stay usable. */
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable"
+    );
+    check(equalizer.available != MDR_FALSE, "the equalizer starts available");
+    check(equalizer.dsee_available != MDR_FALSE, "DSEE starts available");
+
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, eq_off, sizeof(eq_off));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "the equalizer being disabled polls");
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, dsee_off, sizeof(dsee_off));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "DSEE being disabled polls");
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable while disabled"
+    );
+    check(equalizer.available == MDR_FALSE, "a disabled equalizer reads unavailable");
+    check(equalizer.dsee_available == MDR_FALSE, "disabled DSEE reads unavailable");
+
+    /* Support is unchanged throughout - the device still has an equalizer, just not now. */
+    check(
+        mdrHeadphonesGetFeature(session.headphones, MDR_FEATURE_EQUALIZER, &availability_scratch) == MDR_RESULT_OK &&
+        availability_scratch == MDR_AVAILABILITY_AVAILABLE,
+        "the equalizer feature stays supported while unavailable"
+    );
+
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, eq_on, sizeof(eq_on));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "the equalizer being re-enabled polls");
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, dsee_on, sizeof(dsee_on));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "DSEE being re-enabled polls");
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable once re-enabled"
+    );
+    check(equalizer.available != MDR_FALSE, "a re-enabled equalizer reads available");
+    check(equalizer.dsee_available != MDR_FALSE, "re-enabled DSEE reads available");
+    session_close(&session);
+}
+
 static void test_poll_events(void)
 {
     Session session;
@@ -1278,6 +1363,7 @@ int main(void)
     test_init_skips_unadvertised_functions();
     test_init_requests_advertised_functions();
     test_listening_modes();
+    test_equalizer_availability_follows_the_device();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();

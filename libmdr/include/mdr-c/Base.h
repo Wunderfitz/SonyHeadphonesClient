@@ -1,7 +1,12 @@
 #pragma once
 #include <stdint.h>
 
-#define MDR_ABI_VERSION 1u
+/*
+ * Bumped when the layout of anything crossing the C boundary changes, so a caller built
+ * against an older header is refused rather than left reading a struct it does not match.
+ * 2: MDREqualizer gained `available` and `dsee_available`.
+ */
+#define MDR_ABI_VERSION 2u
 
 #if !defined(MDR_API)
 #if defined(_WIN32)

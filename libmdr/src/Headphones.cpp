@@ -1437,7 +1437,9 @@ MDRResult mdrHeadphonesGetEqualizer(
         .clear_bass = static_cast<int8_t>(h.mEqClearBass.current),
         .band_count = static_cast<uint32_t>(h.mEqConfig.current.size()),
         .dsee_enabled = static_cast<MDRBoolean>(h.mUpscalingEnabled.current),
-        .dsee_type = ToNeutral(h.mUpscalingType)
+        .dsee_type = ToNeutral(h.mUpscalingType),
+        .available = static_cast<MDRBoolean>(h.mEqAvailable.current),
+        .dsee_available = static_cast<MDRBoolean>(h.mUpscalingAvailable)
     };
     return MDR_RESULT_OK;
 }

@@ -397,7 +397,8 @@ namespace mdr
         v2::t1::PlaybackStatus mPlayPause{};
 
         v2::t1::UpscalingType mUpscalingType{};
-        bool mUpscalingAvailable{};
+        // Available until the device reports otherwise - not every device ever does.
+        bool mUpscalingAvailable{true};
 
         struct GsCapability
         {
@@ -450,7 +451,7 @@ namespace mdr
         MDRProperty<bool> mHeadGestureEnabled;
 
 
-        MDRProperty<bool> mEqAvailable;
+        MDRProperty<bool> mEqAvailable{true, true, true};
         MDRProperty<v2::t1::EqPresetId> mEqPresetId;
         MDRProperty<int> mEqClearBass;
         // Non-zero band count of either 5: [400,1k,2.5k,6.3k,16k] or 10: [31,63,125,250,500,1k,2k,4k,8k,16k]

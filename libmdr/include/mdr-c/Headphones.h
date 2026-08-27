@@ -320,6 +320,15 @@ typedef struct MDREqualizer
     uint32_t band_count;
     MDRBoolean dsee_enabled;
     MDRDSEEType dsee_type;
+    /*
+     * Whether the device will currently act on changes to these. Distinct from
+     * MDR_FEATURE_EQUALIZER and MDR_FEATURE_DSEE, which say the device has them at all:
+     * a device switches these off while a listening mode is active and reports them
+     * available again once it returns to MDR_LISTENING_STANDARD. Both read MDR_TRUE
+     * until the device says otherwise.
+     */
+    MDRBoolean available;
+    MDRBoolean dsee_available;
 } MDREqualizer;
 
 typedef struct MDRPairedDevice
