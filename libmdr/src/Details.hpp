@@ -435,6 +435,8 @@ namespace mdr
         MDRProperty<bool> mBGMModeEnabled;
         MDRProperty<v2::t1::RoomSize> mBGMModeRoomSize;
         MDRProperty<bool> mUpmixCinemaEnabled;
+        MDRProperty<bool> mVoiceContentsEnabled;
+        MDRProperty<bool> mSoundLeakageReductionEnabled;
 
         MDRProperty<bool> mAutoPauseEnabled;
 

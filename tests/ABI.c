@@ -854,7 +854,42 @@ static void device_pump(Device* device)
     }
 }
 
-static int device_requested(const Device* device, unsigned char table, unsigned char command, int inquired)
+
+/* Drives the exchange until `expected` arrives, or reports that it never did. */
+static void device_run(Session* session, Device* device, MDREvent expected, const char* message)
+{
+    int iteration;
+
+    for (iteration = 0; iteration < 4096; ++iteration)
+    {
+        MDREvent event = MDR_EVENT_NONE;
+        if (mdrHeadphonesPoll(session->headphones, &event) != MDR_RESULT_OK)
+        {
+            check(0, message);
+            return;
+        }
+        device_pump(device);
+        if (event == expected)
+            return;
+    }
+    check(0, message);
+}
+
+/* Runs initialization to completion against `device`, or reports why it could not. */
+static void device_run_init(Session* session, Device* device)
+{
+    check_result(
+        mdrHeadphonesRequestInit(session->headphones),
+        MDR_RESULT_OK,
+        "initialization starts"
+    );
+    device_run(session, device, MDR_EVENT_INITIALIZE_COMPLETE, "initialization completes");
+}
+
+static int device_requested(const Device* device, unsigned char table, unsigned char command, int inquired);
+
+/* Position of a request in the order it was transmitted, or -1 if it was never sent. */
+static int device_request_order(const Device* device, unsigned char table, unsigned char command, int inquired)
 {
     size_t index;
 
@@ -864,34 +899,14 @@ static int device_requested(const Device* device, unsigned char table, unsigned 
         if (entry->table != table || entry->command != command)
             continue;
         if (inquired < 0 || (entry->has_inquired && entry->inquired == (unsigned char)inquired))
-            return 1;
+            return (int)index;
     }
-    return 0;
+    return -1;
 }
 
-/* Runs initialization to completion against `device`, or reports why it could not. */
-static void device_run_init(Session* session, Device* device)
+static int device_requested(const Device* device, unsigned char table, unsigned char command, int inquired)
 {
-    int iteration;
-
-    check_result(
-        mdrHeadphonesRequestInit(session->headphones),
-        MDR_RESULT_OK,
-        "initialization starts"
-    );
-    for (iteration = 0; iteration < 4096; ++iteration)
-    {
-        MDREvent event = MDR_EVENT_NONE;
-        if (mdrHeadphonesPoll(session->headphones, &event) != MDR_RESULT_OK)
-        {
-            check(0, "initialization polls without failing");
-            return;
-        }
-        device_pump(device);
-        if (event == MDR_EVENT_INITIALIZE_COMPLETE)
-            return;
-    }
-    check(0, "initialization completes");
+    return device_request_order(device, table, command, inquired) >= 0;
 }
 
 /*
@@ -974,6 +989,124 @@ static void test_init_requests_advertised_functions(void)
     check(
         !device_requested(&device, 1, 0xe6, 0x04),
         "no UPMIX_CINEMA when only the background-music half of LISTENING_OPTION is advertised"
+    );
+    session_close(&session);
+}
+
+/*
+ * Listening modes are one exclusive setting made of independently advertised parts, so a
+ * device offers whichever subset it implements - the WF-LC900 has background music, voice
+ * boost and sound leakage reduction, but no cinema upmix.
+ */
+static void test_listening_modes(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x04,
+        0xe6, 0xff, /* LISTENING_OPTION */
+        0xeb, 0xff, /* BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE */
+        0xe8, 0xff, /* VOICE_CONTENTS */
+        0xe9, 0xff  /* SOUND_LEAKAGE_REDUCTION - but no UPMIX_CINEMA */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+
+    Session session;
+    Device device;
+    MDRListening listening;
+    MDRFeatureAvailability availability;
+    int off_order;
+    int on_order;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    /* AUDIO_GET_PARAM for each advertised mode, and none for the absent one. */
+    check(device_requested(&device, 1, 0xe6, 0x09), "background music is queried");
+    check(device_requested(&device, 1, 0xe6, 0x06), "voice boost is queried");
+    check(device_requested(&device, 1, 0xe6, 0x07), "sound leakage reduction is queried");
+    check(!device_requested(&device, 1, 0xe6, 0x04), "cinema upmix is not queried");
+
+    availability = MDR_AVAILABILITY_UNKNOWN;
+    check_result(
+        mdrHeadphonesGetFeature(session.headphones, MDR_FEATURE_LISTENING_VOICE_BOOST, &availability),
+        MDR_RESULT_OK,
+        "voice boost availability is readable"
+    );
+    check(availability == MDR_AVAILABILITY_AVAILABLE, "voice boost is available");
+    availability = MDR_AVAILABILITY_UNKNOWN;
+    check_result(
+        mdrHeadphonesGetFeature(session.headphones, MDR_FEATURE_LISTENING_CINEMA, &availability),
+        MDR_RESULT_OK,
+        "cinema availability is readable"
+    );
+    check(availability == MDR_AVAILABILITY_UNAVAILABLE, "cinema is unavailable");
+
+    /* A mode the device does not offer cannot be selected. */
+    memset(&listening, 0, sizeof(listening));
+    listening.mode = MDR_LISTENING_CINEMA;
+    check_result(
+        mdrHeadphonesSetListening(session.headphones, &listening),
+        MDR_RESULT_ERROR_NOT_SUPPORTED,
+        "an unoffered mode is refused"
+    );
+
+    memset(&listening, 0, sizeof(listening));
+    listening.mode = MDR_LISTENING_BACKGROUND_MUSIC;
+    listening.background_room = MDR_ROOM_MEDIUM;
+    check_result(
+        mdrHeadphonesSetListening(session.headphones, &listening),
+        MDR_RESULT_OK,
+        "background music stages"
+    );
+    check_result(mdrHeadphonesRequestCommit(session.headphones), MDR_RESULT_OK, "background music apply starts");
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "background music applies");
+
+    memset(&listening, 0, sizeof(listening));
+    check_result(
+        mdrHeadphonesGetListening(session.headphones, &listening),
+        MDR_RESULT_OK,
+        "listening mode is readable"
+    );
+    check(listening.mode == MDR_LISTENING_BACKGROUND_MUSIC, "background music is the active mode");
+
+    /*
+     * Switching modes must deactivate the old one before activating the new one - a device
+     * that refuses to hold two at once would reject the second command otherwise.
+     */
+    device.log_size = 0;
+    memset(&listening, 0, sizeof(listening));
+    listening.mode = MDR_LISTENING_VOICE_BOOST;
+    check_result(
+        mdrHeadphonesSetListening(session.headphones, &listening),
+        MDR_RESULT_OK,
+        "voice boost stages"
+    );
+    check_result(mdrHeadphonesRequestCommit(session.headphones), MDR_RESULT_OK, "voice boost apply starts");
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "voice boost applies");
+
+    off_order = device_request_order(&device, 1, 0xe8, 0x09); /* AUDIO_SET_PARAM, BGM */
+    on_order = device_request_order(&device, 1, 0xe8, 0x06);  /* AUDIO_SET_PARAM, voice contents */
+    check(off_order >= 0, "the outgoing mode is switched off");
+    check(on_order >= 0, "the incoming mode is switched on");
+    check(off_order < on_order, "the outgoing mode is switched off before the incoming one is switched on");
+
+    memset(&listening, 0, sizeof(listening));
+    check_result(
+        mdrHeadphonesGetListening(session.headphones, &listening),
+        MDR_RESULT_OK,
+        "listening mode is readable after the switch"
+    );
+    check(listening.mode == MDR_LISTENING_VOICE_BOOST, "voice boost is the active mode");
+    check(
+        mdrHeadphonesIsDirty(session.headphones) == MDR_FALSE,
+        "the applied mode leaves nothing pending"
     );
     session_close(&session);
 }
@@ -1144,6 +1277,7 @@ int main(void)
     test_frames_before_protocol_info_are_not_fatal();
     test_init_skips_unadvertised_functions();
     test_init_requests_advertised_functions();
+    test_listening_modes();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();

@@ -46,6 +46,15 @@ typedef uint32_t MDRFeature;
 #define MDR_FEATURE_CONNECTION_MODE ((MDRFeature)27u)
 #define MDR_FEATURE_SAFE_LISTENING ((MDRFeature)28u)
 #define MDR_FEATURE_SOURCE_SWITCH_CONTROL ((MDRFeature)29u)
+/*
+ * Which listening modes the device actually offers. MDR_FEATURE_LISTENING_MODE says the
+ * device groups them into one exclusive setting; these say which of them exist, and a
+ * device advertises them independently.
+ */
+#define MDR_FEATURE_LISTENING_BACKGROUND_MUSIC ((MDRFeature)30u)
+#define MDR_FEATURE_LISTENING_CINEMA ((MDRFeature)31u)
+#define MDR_FEATURE_LISTENING_VOICE_BOOST ((MDRFeature)32u)
+#define MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION ((MDRFeature)33u)
 
 typedef uint32_t MDREvent;
 #define MDR_EVENT_NONE ((MDREvent)0u)
@@ -166,10 +175,17 @@ typedef uint32_t MDRSpeakTimeout;
 #define MDR_SPEAK_TIMEOUT_LONG ((MDRSpeakTimeout)3u)
 #define MDR_SPEAK_TIMEOUT_MANUAL ((MDRSpeakTimeout)4u)
 
+/*
+ * Listening modes are mutually exclusive: at most one is active, and MDR_LISTENING_STANDARD
+ * means none of them is. Which ones a device offers varies - see the
+ * MDR_FEATURE_LISTENING_* availability flags.
+ */
 typedef uint32_t MDRListeningMode;
 #define MDR_LISTENING_STANDARD ((MDRListeningMode)0u)
 #define MDR_LISTENING_BACKGROUND_MUSIC ((MDRListeningMode)1u)
 #define MDR_LISTENING_CINEMA ((MDRListeningMode)2u)
+#define MDR_LISTENING_VOICE_BOOST ((MDRListeningMode)3u)
+#define MDR_LISTENING_SOUND_LEAKAGE_REDUCTION ((MDRListeningMode)4u)
 
 typedef uint32_t MDRRoomSize;
 #define MDR_ROOM_UNKNOWN ((MDRRoomSize)0u)

@@ -65,7 +65,14 @@ namespace mdr
         features[MDR_FEATURE_ADAPTIVE_AMBIENT_SOUND] = mSupport.contains(
             T1::MODE_NC_ASM_NOISE_CANCELLING_DUAL_AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT_NOISE_ADAPTATION);
         features[MDR_FEATURE_SPEAK_TO_CHAT] = mSupport.contains(T1::SMART_TALKING_MODE_TYPE2);
-        features[MDR_FEATURE_LISTENING_MODE] = mSupport.contains(T1::LISTENING_OPTION);
+        const bool listening = mSupport.contains(T1::LISTENING_OPTION);
+        features[MDR_FEATURE_LISTENING_MODE] = listening;
+        // Each mode is advertised on its own; LISTENING_OPTION only says they are exclusive.
+        features[MDR_FEATURE_LISTENING_BACKGROUND_MUSIC] = listening && SupportsBGMMode();
+        features[MDR_FEATURE_LISTENING_CINEMA] = listening && mSupport.contains(T1::UPMIX_CINEMA);
+        features[MDR_FEATURE_LISTENING_VOICE_BOOST] = listening && mSupport.contains(T1::VOICE_CONTENTS);
+        features[MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION] =
+            listening && mSupport.contains(T1::SOUND_LEAKAGE_REDUCTION);
         features[MDR_FEATURE_EQUALIZER] =
             mSupport.contains(T1::PRESET_EQ) || mSupport.contains(T1::CUSTOM_EQ) ||
             mSupport.contains(T1::PRESET_EQ_NON_CUSTOMIZABLE) ||
@@ -233,6 +240,7 @@ namespace mdr
         dirty |= mUpscalingEnabled.dirty();
         dirty |= mAudioPriorityMode.dirty() || mBGMModeEnabled.dirty() || mBGMModeRoomSize.dirty();
         dirty |= mUpmixCinemaEnabled.dirty() || mAutoPauseEnabled.dirty() || mTouchFunctionLeft.dirty();
+        dirty |= mVoiceContentsEnabled.dirty() || mSoundLeakageReductionEnabled.dirty();
         dirty |= mTouchFunctionRight.dirty() || mSpeakToChatEnabled.dirty() || mSpeakToChatDetectSensitivity.dirty();
         dirty |= mSpeakToModeOutTime.dirty() || mHeadGestureEnabled.dirty() || mEqAvailable.dirty();
         dirty |= mEqPresetId.dirty() || mEqClearBass.dirty() || mEqConfig.dirty();
@@ -1105,7 +1113,7 @@ MDRResult mdrHeadphonesGetFeature(
     if (!headphones || !outAvailability)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     // Keep the upper bound on the last MDR_FEATURE_* id, or newly added features read as invalid.
-    if (feature < MDR_FEATURE_IDENTITY || feature > MDR_FEATURE_SOURCE_SWITCH_CONTROL)
+    if (feature < MDR_FEATURE_IDENTITY || feature > MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     const auto& h = *Impl(headphones);
     if (!h.mNeutralInitialized)
@@ -1373,11 +1381,15 @@ MDRResult mdrHeadphonesGetListening(
     if (!headphones || !outListening)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     const auto& h = *Impl(headphones);
-    const bool cinema = h.mUpmixCinemaEnabled.current;
-    const bool background = h.mBGMModeEnabled.current;
+    // At most one is on; if a device ever reports two, the first match wins over guessing.
+    const MDRListeningMode mode =
+        h.mBGMModeEnabled.current ? MDR_LISTENING_BACKGROUND_MUSIC :
+        h.mUpmixCinemaEnabled.current ? MDR_LISTENING_CINEMA :
+        h.mVoiceContentsEnabled.current ? MDR_LISTENING_VOICE_BOOST :
+        h.mSoundLeakageReductionEnabled.current ? MDR_LISTENING_SOUND_LEAKAGE_REDUCTION :
+        MDR_LISTENING_STANDARD;
     *outListening = {
-        .mode = cinema ? MDR_LISTENING_CINEMA :
-            background ? MDR_LISTENING_BACKGROUND_MUSIC : MDR_LISTENING_STANDARD,
+        .mode = mode,
         .background_room = ToNeutral(h.mBGMModeRoomSize.current)
     };
     return MDR_RESULT_OK;
@@ -1385,18 +1397,31 @@ MDRResult mdrHeadphonesGetListening(
 
 MDRResult mdrHeadphonesSetListening(MDRHeadphones* headphones, const MDRListening* listening)
 {
-    if (!headphones || !listening || listening->mode > MDR_LISTENING_CINEMA)
+    if (!headphones || !listening || listening->mode > MDR_LISTENING_SOUND_LEAKAGE_REDUCTION)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     auto* h = Impl(headphones);
     if (!h->mSupport.contains(mdr::v2::t1::FunctionType::LISTENING_OPTION))
+        return MDR_RESULT_ERROR_NOT_SUPPORTED;
+    static constexpr MDRFeature kModeFeatures[] = {
+        0, /* MDR_LISTENING_STANDARD is always reachable - it is every mode turned off */
+        MDR_FEATURE_LISTENING_BACKGROUND_MUSIC,
+        MDR_FEATURE_LISTENING_CINEMA,
+        MDR_FEATURE_LISTENING_VOICE_BOOST,
+        MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION
+    };
+    if (listening->mode != MDR_LISTENING_STANDARD &&
+        !h->mSupport.contains(kModeFeatures[listening->mode]))
         return MDR_RESULT_ERROR_NOT_SUPPORTED;
     auto room = h->mBGMModeRoomSize.desired;
     if (listening->background_room != MDR_ROOM_UNKNOWN && !FromNeutral(listening->background_room, room))
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
     if (listening->mode == MDR_LISTENING_BACKGROUND_MUSIC && listening->background_room == MDR_ROOM_UNKNOWN)
         return MDR_RESULT_ERROR_INVALID_ARGUMENT;
+    // The modes are exclusive, so selecting one stages every other one off.
     h->mBGMModeEnabled.stage(listening->mode == MDR_LISTENING_BACKGROUND_MUSIC);
     h->mUpmixCinemaEnabled.stage(listening->mode == MDR_LISTENING_CINEMA);
+    h->mVoiceContentsEnabled.stage(listening->mode == MDR_LISTENING_VOICE_BOOST);
+    h->mSoundLeakageReductionEnabled.stage(listening->mode == MDR_LISTENING_SOUND_LEAKAGE_REDUCTION);
     h->mBGMModeRoomSize.stage(room);
     return MDR_RESULT_OK;
 }

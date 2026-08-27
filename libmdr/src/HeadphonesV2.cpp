@@ -179,6 +179,10 @@ namespace mdr
                 SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::BGM_MODE_AND_ERRORCODE});
             if (mSupport.contains(t1::FunctionType::UPMIX_CINEMA))
                 SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::UPMIX_CINEMA});
+            if (mSupport.contains(t1::FunctionType::VOICE_CONTENTS))
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::VOICE_CONTENTS});
+            if (mSupport.contains(t1::FunctionType::SOUND_LEAKAGE_REDUCTION))
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::SOUND_LEAKAGE_REDUCTION});
         }
 
         /* Equalizer */
@@ -334,6 +338,8 @@ namespace mdr
         mBGMModeEnabled.submit();
         mBGMModeRoomSize.submit();
         mUpmixCinemaEnabled.submit();
+        mVoiceContentsEnabled.submit();
+        mSoundLeakageReductionEnabled.submit();
         mAutoPauseEnabled.submit();
         mTouchFunctionLeft.submit();
         mTouchFunctionRight.submit();
@@ -600,13 +606,17 @@ namespace mdr
             }
         }
 
-        /* Listening Mode */
+        /* Listening Mode
+         * The modes are mutually exclusive, so a switch turns one off and another on. Send
+         * every deactivation before any activation: a device that refuses to have two on at
+         * once would reject the new mode if the old one were still set. */
         if (mSupport.contains(t1::FunctionType::LISTENING_OPTION))
         {
             using namespace t1;
-            if (mBGMModeEnabled.pending() || mBGMModeRoomSize.pending())
+            const bool bgmPending = mBGMModeEnabled.pending() || mBGMModeRoomSize.pending();
+            for (int activating = 0; activating < 2; ++activating)
             {
-                if (SupportsBGMMode())
+                if (bgmPending && mBGMModeEnabled.submitted == (activating != 0) && SupportsBGMMode())
                 {
                     AudioSetParamBGMMode res;
                     res.command = Command::AUDIO_SET_PARAM;
@@ -617,12 +627,8 @@ namespace mdr
                     res.targetRoomSize = mBGMModeRoomSize.submitted;
                     SendCommandACK(AudioSetParamBGMMode, res);
                 }
-                mBGMModeEnabled.commit(), mBGMModeRoomSize.commit();
-                MDR_LOG("S/W BGM BGM {} ROOM {} UPMIX {}", mBGMModeEnabled.desired, mBGMModeRoomSize.desired, mUpmixCinemaEnabled.desired);
-            }
-            if (mUpmixCinemaEnabled.pending())
-            {
-                if (mSupport.contains(FunctionType::UPMIX_CINEMA))
+                if (mUpmixCinemaEnabled.pending() && mUpmixCinemaEnabled.submitted == (activating != 0) &&
+                    mSupport.contains(FunctionType::UPMIX_CINEMA))
                 {
                     AudioSetParamUpmixCinema res;
                     res.command = Command::AUDIO_SET_PARAM;
@@ -631,9 +637,32 @@ namespace mdr
                         : OnOffSettingValue::OFF;
                     SendCommandACK(AudioSetParamUpmixCinema, res);
                 }
-                mUpmixCinemaEnabled.commit();
-                MDR_LOG("S/W CNE BGM {} ROOM {} UPMIX {}", mBGMModeEnabled.desired, mBGMModeRoomSize.desired, mUpmixCinemaEnabled.desired);
+                if (mVoiceContentsEnabled.pending() && mVoiceContentsEnabled.submitted == (activating != 0) &&
+                    mSupport.contains(FunctionType::VOICE_CONTENTS))
+                {
+                    AudioSetParamVoiceContents res;
+                    res.onOffSettingValue = mVoiceContentsEnabled.submitted
+                        ? OnOffSettingValue::ON
+                        : OnOffSettingValue::OFF;
+                    SendCommandACK(AudioSetParamVoiceContents, res);
+                }
+                if (mSoundLeakageReductionEnabled.pending() &&
+                    mSoundLeakageReductionEnabled.submitted == (activating != 0) &&
+                    mSupport.contains(FunctionType::SOUND_LEAKAGE_REDUCTION))
+                {
+                    AudioSetParamSoundLeakageReduction res;
+                    res.onOffSettingValue = mSoundLeakageReductionEnabled.submitted
+                        ? OnOffSettingValue::ON
+                        : OnOffSettingValue::OFF;
+                    SendCommandACK(AudioSetParamSoundLeakageReduction, res);
+                }
             }
+            // Consume the staged values even where the send was skipped, or IsDirty() never clears.
+            if (bgmPending)
+                mBGMModeEnabled.commit(), mBGMModeRoomSize.commit();
+            mUpmixCinemaEnabled.commit();
+            mVoiceContentsEnabled.commit();
+            mSoundLeakageReductionEnabled.commit();
         }
 
         /* EQ */

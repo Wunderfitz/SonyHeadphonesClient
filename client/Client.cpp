@@ -1240,39 +1240,56 @@ void DrawDeviceControlsSound()
         if (ImGui::TreeNodeEx("Listening Mode", ImGuiTreeNodeFlags_DefaultOpen))
         {
             bool changed = false;
+            // Standard is every mode turned off, so it is offered whenever any mode exists.
             if (ImGui::RadioButton("Standard", listening.mode == MDR_LISTENING_STANDARD))
                 listening.mode = MDR_LISTENING_STANDARD, changed = true;
-            if (ImGui::RadioButton("BGM", listening.mode == MDR_LISTENING_BACKGROUND_MUSIC))
+
+            const bool haveBackgroundMusic = FeatureAvailable(MDR_FEATURE_LISTENING_BACKGROUND_MUSIC);
+            if (haveBackgroundMusic &&
+                ImGui::RadioButton("Ambient Background Music", listening.mode == MDR_LISTENING_BACKGROUND_MUSIC))
                 listening.mode = MDR_LISTENING_BACKGROUND_MUSIC, changed = true;
 
-            ImGui::Indent();
-            ImGui::BeginDisabled(listening.mode != MDR_LISTENING_BACKGROUND_MUSIC);
-            static const std::pair<MDRRoomSize, const char*> kBGMDistanceModes[] = {
-                {MDR_ROOM_SMALL, "My Room"},
-                {MDR_ROOM_MEDIUM, "Living Room"},
-                {MDR_ROOM_LARGE, "Cafe"},
-            };
-            const char* currentDistStr = "Unknown";
-            for (auto const& [k, v] : kBGMDistanceModes)
-                if (k == listening.background_room)
-                    currentDistStr = v;
-            if (ImGui::BeginCombo("Distance", currentDistStr))
+            if (haveBackgroundMusic)
             {
+                ImGui::Indent();
+                ImGui::BeginDisabled(listening.mode != MDR_LISTENING_BACKGROUND_MUSIC);
+                static const std::pair<MDRRoomSize, const char*> kBGMDistanceModes[] = {
+                    {MDR_ROOM_SMALL, "My Room"},
+                    {MDR_ROOM_MEDIUM, "Living Room"},
+                    {MDR_ROOM_LARGE, "Cafe"},
+                };
+                const char* currentDistStr = "Unknown";
                 for (auto const& [k, v] : kBGMDistanceModes)
+                    if (k == listening.background_room)
+                        currentDistStr = v;
+                if (ImGui::BeginCombo("Distance", currentDistStr))
                 {
-                    bool is_selected = k == listening.background_room;
-                    if (ImGui::Selectable(v, is_selected))
-                        listening.background_room = k, changed = true;
-                    if (is_selected)
-                        ImGui::SetItemDefaultFocus();
+                    for (auto const& [k, v] : kBGMDistanceModes)
+                    {
+                        bool is_selected = k == listening.background_room;
+                        if (ImGui::Selectable(v, is_selected))
+                            listening.background_room = k, changed = true;
+                        if (is_selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                ImGui::EndDisabled();
+                ImGui::Unindent();
             }
-            ImGui::EndDisabled();
-            ImGui::Unindent();
 
-            if (ImGui::RadioButton("Cinema", listening.mode == MDR_LISTENING_CINEMA))
+            if (FeatureAvailable(MDR_FEATURE_LISTENING_CINEMA) &&
+                ImGui::RadioButton("Cinema", listening.mode == MDR_LISTENING_CINEMA))
                 listening.mode = MDR_LISTENING_CINEMA, changed = true;
+
+            if (FeatureAvailable(MDR_FEATURE_LISTENING_VOICE_BOOST) &&
+                ImGui::RadioButton("Voice Boost", listening.mode == MDR_LISTENING_VOICE_BOOST))
+                listening.mode = MDR_LISTENING_VOICE_BOOST, changed = true;
+
+            if (FeatureAvailable(MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION) &&
+                ImGui::RadioButton(
+                    "Sound Leakage Reduction", listening.mode == MDR_LISTENING_SOUND_LEAKAGE_REDUCTION))
+                listening.mode = MDR_LISTENING_SOUND_LEAKAGE_REDUCTION, changed = true;
 
             if (changed && haveListening)
                 mdrHeadphonesSetListening(gDevice, &listening);
@@ -1664,6 +1681,10 @@ void DrawDeviceControlsAbout()
             {"Adaptive ambient sound", MDR_FEATURE_ADAPTIVE_AMBIENT_SOUND},
             {"Speak to Chat", MDR_FEATURE_SPEAK_TO_CHAT},
             {"Listening mode", MDR_FEATURE_LISTENING_MODE},
+            {"Listening: background music", MDR_FEATURE_LISTENING_BACKGROUND_MUSIC},
+            {"Listening: cinema", MDR_FEATURE_LISTENING_CINEMA},
+            {"Listening: voice boost", MDR_FEATURE_LISTENING_VOICE_BOOST},
+            {"Listening: sound leakage reduction", MDR_FEATURE_LISTENING_SOUND_LEAKAGE_REDUCTION},
             {"Equalizer", MDR_FEATURE_EQUALIZER},
             {"DSEE", MDR_FEATURE_DSEE},
             {"Paired device management", MDR_FEATURE_PAIRED_DEVICE_MANAGEMENT},
