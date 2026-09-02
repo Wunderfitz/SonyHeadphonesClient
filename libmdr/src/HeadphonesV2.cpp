@@ -620,13 +620,32 @@ namespace mdr
          * every deactivation before any activation: a device that refuses to have two on at
          * once would reject the new mode if the old one were still set. */
         const bool bgmPending = state.mBGMModeEnabled.pending() || state.mBGMModeRoomSize.pending();
-        if (bgmPending || state.mUpmixCinemaEnabled.pending() || state.mVoiceContentsEnabled.pending() ||
-            state.mSoundLeakageReductionEnabled.pending())
+        const bool cinemaPending = state.mUpmixCinemaEnabled.pending();
+        const bool voiceContentsPending = state.mVoiceContentsEnabled.pending();
+        const bool soundLeakageReductionPending = state.mSoundLeakageReductionEnabled.pending();
+        if (bgmPending || cinemaPending || voiceContentsPending || soundLeakageReductionPending)
         {
             using namespace t1;
             // LISTENING_OPTION only says the device groups these under one setting; each mode is
             // advertised on its own, so every send is gated on the one it actually needs.
             const bool grouped = state.mSupport.contains(FunctionType::LISTENING_OPTION);
+
+            /* Take the staged values as current before the first send, not after the
+             * last one. Every SendCommandACK below suspends until the device answers,
+             * and frames that arrive meanwhile are dispatched from the same poll - so a
+             * client reading the listening mode mid-switch would otherwise see the old
+             * mode already off and the new one not yet on. The modes are exclusive and
+             * their flags are separate, so that half-applied state reads as a mode of
+             * its own: Standard. The device's own notifications still overwrite() all of
+             * this once they land, so this only moves an optimistic update earlier.
+             * It also consumes the staged values where a send is skipped, without which
+             * IsDirty() would never clear. */
+            if (bgmPending)
+                state.mBGMModeEnabled.commit(), state.mBGMModeRoomSize.commit();
+            state.mUpmixCinemaEnabled.commit();
+            state.mVoiceContentsEnabled.commit();
+            state.mSoundLeakageReductionEnabled.commit();
+
             for (int activating = 0; activating < 2; ++activating)
             {
                 if (bgmPending && state.mBGMModeEnabled.submitted == (activating != 0) &&
@@ -641,8 +660,7 @@ namespace mdr
                     res.targetRoomSize = state.mBGMModeRoomSize.submitted;
                     SendCommandACK(AudioSetParamBGMMode, res);
                 }
-                if (state.mUpmixCinemaEnabled.pending() &&
-                    state.mUpmixCinemaEnabled.submitted == (activating != 0) &&
+                if (cinemaPending && state.mUpmixCinemaEnabled.submitted == (activating != 0) &&
                     grouped && state.mSupport.contains(FunctionType::UPMIX_CINEMA))
                 {
                     AudioSetParamUpmixCinema res;
@@ -652,8 +670,7 @@ namespace mdr
                         : OnOffSettingValue::OFF;
                     SendCommandACK(AudioSetParamUpmixCinema, res);
                 }
-                if (state.mVoiceContentsEnabled.pending() &&
-                    state.mVoiceContentsEnabled.submitted == (activating != 0) &&
+                if (voiceContentsPending && state.mVoiceContentsEnabled.submitted == (activating != 0) &&
                     grouped && state.mSupport.contains(FunctionType::VOICE_CONTENTS))
                 {
                     AudioSetParamVoiceContents res;
@@ -662,7 +679,7 @@ namespace mdr
                         : OnOffSettingValue::OFF;
                     SendCommandACK(AudioSetParamVoiceContents, res);
                 }
-                if (state.mSoundLeakageReductionEnabled.pending() &&
+                if (soundLeakageReductionPending &&
                     state.mSoundLeakageReductionEnabled.submitted == (activating != 0) &&
                     grouped && state.mSupport.contains(FunctionType::SOUND_LEAKAGE_REDUCTION))
                 {
@@ -673,12 +690,6 @@ namespace mdr
                     SendCommandACK(AudioSetParamSoundLeakageReduction, res);
                 }
             }
-            // Consume the staged values even where the send was skipped, or IsDirty() never clears.
-            if (bgmPending)
-                state.mBGMModeEnabled.commit(), state.mBGMModeRoomSize.commit();
-            state.mUpmixCinemaEnabled.commit();
-            state.mVoiceContentsEnabled.commit();
-            state.mSoundLeakageReductionEnabled.commit();
             MDR_LOG("S/W LSN BGM {} ROOM {} UPMIX {} VOICE {} LEAK {}",
                     state.mBGMModeEnabled.desired, state.mBGMModeRoomSize.desired,
                     state.mUpmixCinemaEnabled.desired, state.mVoiceContentsEnabled.desired,
