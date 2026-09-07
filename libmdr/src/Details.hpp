@@ -279,7 +279,12 @@ namespace mdr
          * send path. This is an internal C++ developer API, not part of the C ABI.
          */
         MDRTask RequestDebugCommand(MDRBuffer payload, MDRDataType type, MDRCommandSeqNumber sequence, bool awaitAck);
-        [[nodiscard]] MDRCommandSeqNumber CurrentSequenceNumber() const noexcept { return mSeqNumber; }
+        /**
+         * @brief Sequence number the next transmitted DATA frame will carry.
+         * @note  This is purely a transmit-side counter. It is deliberately unrelated to
+         *        the sequence numbers of inbound frames - see @ref mTxSeqNumber.
+         */
+        [[nodiscard]] MDRCommandSeqNumber CurrentSequenceNumber() const noexcept { return mTxSeqNumber; }
 
         MDRTask RequestInitV1();
         MDRTask RequestSyncV1();
@@ -327,7 +332,20 @@ namespace mdr
         MDRPacketCallback mPacketCallback{};
         void* mPacketCallbackUserData{};
         Deque<UInt8> mRecvBuf, mSendBuf;
-        MDRCommandSeqNumber mSeqNumber{0};
+        /**
+         * @brief Sequence number carried by the DATA frames we transmit, toggled between 0 and 1.
+         *
+         * MDR devices use this to tell a fresh request apart from a retransmission: a frame
+         * repeating the sequence number of an already acknowledged one is silently dropped as
+         * a duplicate. So this only advances once the device has acknowledged the frame that
+         * used it (@ref HandleAck), which is also what lets the retry loop in
+         * @ref SendCommandACK re-send the identical frame and have it accepted.
+         *
+         * It must NOT be derived from inbound frames. Devices are free to interleave
+         * unsolicited notifications and late responses into the exchange, and letting those
+         * drive the transmit counter desynchronizes us from the device.
+         */
+        MDRCommandSeqNumber mTxSeqNumber{0};
 
         MDRTask mTask;
         Array<Awaiter, AWAIT_NUM_TYPES> mAwaiters{};
@@ -377,7 +395,7 @@ namespace mdr
                              serialized.errMessage ? serialized.errMessage : "Unable to serialize command");
                 return serialized.error;
             }
-            SendCommandImpl({buf, buf + serialized.value}, type, mSeqNumber);
+            SendCommandImpl({buf, buf + serialized.value}, type, mTxSeqNumber);
             return MDR_RESULT_OK;
         }
 
@@ -430,12 +448,11 @@ namespace mdr::detail
  *
  * TL;DR, this helps with compiler bloats. Use it well.
  *
- * @note On bumping mSeqNumber. Ignoring transport issues (which is not a thing with RFCOMM backends at least), a
- * timeout can only occur when:
- *       - The device is shutting down
- *       - Or when we actually _missed_ a packet. Which can happen as chunked packets are discared by us _currently_
- *         We should handle this (hence the FIXME). For now retrying by assuming we got another ACK works despite the
- * lack thereof.
+ * @note On the sequence number across retries. A retransmission deliberately repeats the sequence
+ *       number of the frame it re-sends: that is how the device tells a genuine retry apart from a
+ *       new request, and @ref mTxSeqNumber only advances once a frame has actually been
+ *       acknowledged. Flipping it here would make every retry look like a fresh frame, and the
+ *       device would then answer the following request as if it were the duplicate.
  */
 #define SendCommandACK(Type, ...)                                                                                      \
     do                                                                                                                 \
@@ -450,7 +467,6 @@ namespace mdr::detail
             if (res == MDR_RESULT_OK)                                                                                  \
                 break;                                                                                                 \
             MDR_LOG("FIXME-ACK Timeout. Retry {}/{}", _retries, mACKRetriesCount);                                     \
-            mSeqNumber ^= 1;                                                                                           \
         }                                                                                                              \
         if (_retries == mACKRetriesCount)                                                                              \
             co_return SetLastError(MDR_RESULT_ERROR_TIMEOUT, "Timeout exceeded waiting for device to respond");        \

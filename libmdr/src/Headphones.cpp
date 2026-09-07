@@ -68,7 +68,10 @@ namespace mdr
         bool awaitAck
     )
     {
-        SendCommandImpl(payload, type, sequence);
+        // The debugger drives the envelope itself; adopt its sequence number so the
+        // acknowledgement is still recognized and the counter stays in step afterwards.
+        mTxSeqNumber = static_cast<MDRCommandSeqNumber>(sequence & 1u);
+        SendCommandImpl(payload, type, mTxSeqNumber);
         if (awaitAck)
         {
             const int result = co_await Await(AWAIT_ACK);
@@ -176,7 +179,6 @@ namespace mdr
     int MDRHeadphones::Handle(Span<const UInt8> command, MDRDataType type, MDRCommandSeqNumber seq)
     {
         using enum MDRDataType;
-        mSeqNumber = seq;
         switch (type)
         {
         case ACK:
@@ -310,8 +312,19 @@ namespace mdr
         SendCommandImpl({}, MDRDataType::ACK, 1 - seq);
     }
 
-    void MDRHeadphones::HandleAck(MDRCommandSeqNumber)
+    void MDRHeadphones::HandleAck(MDRCommandSeqNumber seq)
     {
+        // Devices acknowledge a DATA frame by echoing the inverted sequence number, the same
+        // convention @ref SendACK follows. Anything else acknowledges a frame we are no longer
+        // waiting on - a duplicate, or one the device re-sent late - and must not satisfy the
+        // pending await, or we would advance while our actual frame is still outstanding.
+        const auto expected = static_cast<MDRCommandSeqNumber>(1 - mTxSeqNumber);
+        if (seq != expected)
+        {
+            MDR_LOG_DEBUG("Ignoring stale ACK seq {} (awaiting {})", seq, expected);
+            return;
+        }
+        mTxSeqNumber = expected;
         Awake(AWAIT_ACK);
     }
 }

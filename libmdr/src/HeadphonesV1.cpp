@@ -665,7 +665,7 @@ namespace mdr
                     static_cast<UInt8>(state.mSpeakToChatVoiceFocus),
                     static_cast<UInt8>(state.mSpeakToModeOutTime.submitted)
                 };
-                SendCommandImpl(payload, MDRDataType::DATA_MDR, mSeqNumber);
+                SendCommandImpl(payload, MDRDataType::DATA_MDR, mTxSeqNumber);
                 const int result = co_await Await(AWAIT_ACK);
                 if (result != MDR_RESULT_OK)
                     co_return SetLastError(result, "Timeout waiting for V1 Speak-to-Chat options");
