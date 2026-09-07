@@ -48,12 +48,14 @@ Notes:
 - **NC/AMB, Speak to Chat, Head Gesture, Automatic Power Off**: the device advertises no
   corresponding function at all — it is an open-ear design with no noise cancelling.
   libmdr correctly sends no `NCASM` command during the whole session.
-- **Cinema Upmix**: libmdr gates both `BGM_MODE_AND_ERRORCODE` and `UPMIX_CINEMA` on the
-  single `LISTENING_OPTION` function. This device implements only the BGM half, so the
-  `AUDIO_GET_PARAM UPMIX_CINEMA` request is acknowledged but never answered.
-- **Pause When Headphones Are Removed**: libmdr requests
-  `SYSTEM_GET_PARAM PLAYBACK_CONTROL_BY_WEARING` unconditionally. The device does not
-  advertise it and acknowledges without answering.
+- **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so it
+  implements only the background-music half. libmdr no longer asks for the other half; in
+  the capture above, taken before that gate existed, the request is acknowledged and then
+  never answered. The client still offers a Cinema option under Listening Mode, which this
+  device ignores.
+- **Pause When Headphones Are Removed**: the device does not advertise
+  `PLAYBACK_CONTROL_BY_WEARING_REMOVING_HEADPHONE_ON_OFF`. libmdr no longer requests it; the
+  capture above still shows the unconditional request, acknowledged and unanswered.
 - The device pushes an unsolicited `PLAY_NTFY_PARAM` immediately after connecting, at a
   point that varies between runs. Landing before `CONNECT_RET_PROTOCOL_INFO` used to abort
   the session, and its effect on the sequence counter used to desynchronize the exchange;

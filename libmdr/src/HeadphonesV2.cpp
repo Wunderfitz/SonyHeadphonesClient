@@ -91,16 +91,15 @@ namespace mdr
         if (state.mSupport.contains(t1::FunctionType::CODEC_INDICATOR))
             SendCommandACK(t1::CommonGetStatus, { .type = t1::CommonInquiredType::AUDIO_CODEC });
 
-        /* Playback Metadata */
-        SendCommandACK(t1::GetPlayParam,
-                       { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
-
-        /* Playback Volume */
-        SendCommandACK(t1::GetPlayParam, { .type = t1::PlayInquiredType::MUSIC_VOLUME });
-
-        /* Play/Pause */
-        SendCommandACK(t1::GetPlayStatus,
-                       { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+        /* Playback Metadata, Volume, Play/Pause */
+        if (SupportsFeature(state, MDR_FEATURE_PLAYBACK_METADATA))
+        {
+            SendCommandACK(t1::GetPlayParam,
+                           { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+            SendCommandACK(t1::GetPlayParam, { .type = t1::PlayInquiredType::MUSIC_VOLUME });
+            SendCommandACK(t1::GetPlayStatus,
+                           { .type = t1::PlayInquiredType::PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT });
+        }
 
         /* NC/AMB */
         if (state.mSupport.contains(
@@ -168,16 +167,24 @@ namespace mdr
             SendCommandACK(t1::SystemGetExtParam, {.type = t1::SystemInquiredType::SMART_TALKING_MODE_TYPE2});
         }
 
-        /* Listening Mode */
+        /* Listening Mode
+         * LISTENING_OPTION only says the device groups these under one setting. Each half is
+         * advertised on its own, and a device that implements just one of them acknowledges
+         * the other request and then never answers it. */
         if (state.mSupport.contains(t1::FunctionType::LISTENING_OPTION))
         {
-            SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::BGM_MODE_AND_ERRORCODE});
-            SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::UPMIX_CINEMA});
+            if (state.mSupport.containsBGMMode())
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::BGM_MODE_AND_ERRORCODE});
+            if (state.mSupport.contains(t1::FunctionType::UPMIX_CINEMA))
+                SendCommandACK(t1::AudioGetParam, {.type = t1::AudioInquiredType::UPMIX_CINEMA});
         }
 
         /* Equalizer */
-        SendCommandACK(t1::EqEbbGetStatus, {.type = t1::EqEbbInquiredType::PRESET_EQ});
-        SendCommandACK(t1::EqEbbGetParam);
+        if (SupportsFeature(state, MDR_FEATURE_EQUALIZER))
+        {
+            SendCommandACK(t1::EqEbbGetStatus, {.type = t1::EqEbbInquiredType::PRESET_EQ});
+            SendCommandACK(t1::EqEbbGetParam);
+        }
 
         /* Connection Quality */
         if (state.mSupport.contains(
@@ -215,10 +222,13 @@ namespace mdr
         }
 
         /* Pause when headphones are removed */
-        SendCommandACK(t1::SystemGetParam, {.type = t1::SystemInquiredType::PLAYBACK_CONTROL_BY_WEARING });
+        if (SupportsFeature(state, MDR_FEATURE_AUTO_PAUSE))
+            SendCommandACK(t1::SystemGetParam, {.type = t1::SystemInquiredType::PLAYBACK_CONTROL_BY_WEARING });
 
-        /* Voice Guidance */
-        if (state.mProtocol.hasTable2)
+        /* Voice Guidance
+         * These live in table 2, but having table 2 is not the same as having voice guidance -
+         * the commit path already gates on the function itself. */
+        if (SupportsFeature(state, MDR_FEATURE_VOICE_GUIDANCE))
         {
             /* Enabled */
             SendCommandACK(t2::VoiceGuidanceGetParam,
@@ -228,7 +238,8 @@ namespace mdr
                            });
 
             /* Volume */
-            SendCommandACK(t2::VoiceGuidanceGetParam, {.inquiredType = t2::VoiceGuidanceInquiredType::VOLUME});
+            if (SupportsFeature(state, MDR_FEATURE_VOICE_GUIDANCE_VOLUME))
+                SendCommandACK(t2::VoiceGuidanceGetParam, {.inquiredType = t2::VoiceGuidanceInquiredType::VOLUME});
         }
 
         /* LOG_SET_STATUS */
@@ -602,7 +613,9 @@ namespace mdr
         if (state.mBGMModeEnabled.pending() || state.mBGMModeRoomSize.pending())
         {
             using namespace t1;
-            if (state.mSupport.contains(FunctionType::LISTENING_OPTION))
+            // LISTENING_OPTION only says the device groups these under one setting; each half is
+            // advertised on its own, so gate on the one this write actually needs.
+            if (state.mSupport.contains(FunctionType::LISTENING_OPTION) && state.mSupport.containsBGMMode())
             {
                 AudioSetParamBGMMode res;
                 res.command = Command::AUDIO_SET_PARAM;
@@ -619,7 +632,9 @@ namespace mdr
         if (state.mUpmixCinemaEnabled.pending())
         {
             using namespace t1;
-            if (state.mSupport.contains(FunctionType::LISTENING_OPTION))
+            // See the BGM write above - UPMIX_CINEMA is advertised separately from the group.
+            if (state.mSupport.contains(FunctionType::LISTENING_OPTION) &&
+                state.mSupport.contains(FunctionType::UPMIX_CINEMA))
             {
                 AudioSetParamUpmixCinema res;
                 res.command = Command::AUDIO_SET_PARAM;
