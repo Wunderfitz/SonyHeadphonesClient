@@ -767,6 +767,9 @@ typedef struct Device
      * change: with the band steps it computed for that preset. */
     const unsigned char* eq_notification;
     size_t eq_notification_size;
+    /* When set, the device answers a status request the way one that has just switched a
+     * listening mode on does: with both the equalizer and the upscaling turned off. */
+    int answer_status_disabled;
     RequestLog log[REQUEST_LOG_CAPACITY];
     size_t log_size;
 } Device;
@@ -823,6 +826,19 @@ static void device_pump(Device* device)
                 device_send(device, MDR_DATA_TYPE_DATA_MDR, device->table1, device->table1_size);
             else
                 device_send(device, MDR_DATA_TYPE_DATA_MDR_NO2, device->table2, device->table2_size);
+        }
+        else if (table == 1 && frame.payload[0] == 0x52 && device->answer_status_disabled)
+        {
+            /* EQEBB_GET_STATUS -> EQEBB_RET_STATUS PRESET_EQ DISABLE */
+            static const unsigned char answer[] = {0x53, 0x00, 0x01};
+            device_send(device, MDR_DATA_TYPE_DATA_MDR, answer, sizeof(answer));
+        }
+        else if (table == 1 && frame.payload[0] == 0xe2 && frame.payload_size > 1
+                 && frame.payload[1] == 0x01 && device->answer_status_disabled)
+        {
+            /* AUDIO_GET_STATUS UPSCALING -> AUDIO_RET_STATUS UPSCALING DISABLE */
+            static const unsigned char answer[] = {0xe3, 0x01, 0x01};
+            device_send(device, MDR_DATA_TYPE_DATA_MDR, answer, sizeof(answer));
         }
         else if (table == 1 && frame.payload[0] == 0x58 && device->eq_notification != NULL)
         {
@@ -1445,6 +1461,114 @@ static void test_preset_change_does_not_write_bands(void)
     session_close(&session);
 }
 
+/*
+ * A listening mode takes the equalizer and the upscaling with it, and the device says so in
+ * its own time - or not at all, if the notification is missed. Nothing re-reads either
+ * status afterwards, RequestSyncV2 included, so a client that only ever waits to be told
+ * goes on offering controls the device is ignoring for the rest of the session. Switching a
+ * mode therefore asks.
+ */
+static void test_listening_mode_rereads_what_it_takes_away(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x04,
+        0xe6, 0xff, /* LISTENING_OPTION */
+        0xeb, 0xff, /* BGM_MODE_SMALL_MIDDLE_LARGE_AND_ERRORCODE */
+        0x50, 0xff, /* PRESET_EQ */
+        0xe2, 0xff  /* UPSCALING_AUTO_OFF */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+
+    Session session;
+    Device device;
+    MDRListening listening;
+    MDREqualizer equalizer;
+    size_t requests_before;
+    int asked_equalizer = 0;
+    int asked_upscaling = 0;
+    int iteration;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    /* Nothing has been said, so both stand available. */
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable"
+    );
+    check(equalizer.available != MDR_FALSE, "the equalizer starts available");
+    check(equalizer.dsee_available != MDR_FALSE, "DSEE starts available");
+
+    /* From here the device answers a status request, and notifies nothing of its own. */
+    device.answer_status_disabled = 1;
+
+    /* Initialization asks for both statuses too, so only what follows the switch counts. */
+    requests_before = device.log_size;
+
+    memset(&listening, 0, sizeof(listening));
+    mdrHeadphonesGetListening(session.headphones, &listening);
+    listening.mode = MDR_LISTENING_BACKGROUND_MUSIC;
+    listening.background_room = MDR_ROOM_SMALL;
+    check_result(
+        mdrHeadphonesSetListening(session.headphones, &listening),
+        MDR_RESULT_OK,
+        "the listening mode stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the listening change starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the listening change completes");
+
+    for (iteration = (int)requests_before; iteration < (int)device.log_size; ++iteration)
+    {
+        const RequestLog* entry = &device.log[iteration];
+        if (entry->table != 1 || !entry->has_inquired)
+            continue;
+        if (entry->command == 0x52 && entry->inquired == 0x00)
+            asked_equalizer = 1;
+        if (entry->command == 0xe2 && entry->inquired == 0x01)
+            asked_upscaling = 1;
+    }
+    check(asked_equalizer, "switching a listening mode asks for the equalizer status");
+    check(asked_upscaling, "switching a listening mode asks for the upscaling status");
+
+    /* Drain the answers the device gave to those. */
+    for (iteration = 0; iteration < 64; ++iteration)
+    {
+        MDREvent event = MDR_EVENT_NONE;
+        mdrHeadphonesPoll(session.headphones, &event);
+        device_pump(&device);
+    }
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable after the switch"
+    );
+    check(
+        equalizer.available == MDR_FALSE,
+        "the equalizer reads unavailable without having been notified"
+    );
+    check(
+        equalizer.dsee_available == MDR_FALSE,
+        "DSEE reads unavailable without having been notified"
+    );
+    session_close(&session);
+}
+
 static void test_poll_events(void)
 {
     Session session;
@@ -1614,6 +1738,7 @@ int main(void)
     test_equalizer_availability_follows_the_device();
     test_equalizer_presets_follow_the_capability();
     test_preset_change_does_not_write_bands();
+    test_listening_mode_rereads_what_it_takes_away();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();

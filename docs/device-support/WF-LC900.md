@@ -64,7 +64,11 @@ Notes:
   `AUDIO_NTFY_STATUS UPSCALING DISABLE`, and reports them available again on Standard. Both
   reach the client through `MDREqualizer.available` and `MDREqualizer.dsee_available`, which
   are about what the device will act on right now - `MDR_FEATURE_EQUALIZER` and
-  `MDR_FEATURE_DSEE` stay set throughout, because the hardware still has both.
+  `MDR_FEATURE_DSEE` stay set throughout, because the hardware still has both. libmdr no
+  longer relies on those notifications alone: applying a listening mode asks for both
+  statuses, since nothing else ever re-reads them. Confirmed on 2.0.3 - a client that only
+  waited for the notification kept the equalizer on screen as usable through every mode
+  switch, and one that asks greys it out with the upscaling, every time.
 - **The equalizer preset list** comes from `EQEBB_GET_CAPABILITY PRESET_EQ`, which the first
   two captures predate. The device answers with `band` 10, `step` 13 and eight presets -
   `OFF`, `HEAVY`, `CLEAR`, `HARD`, `SOFT`, `CUSTOM`, `USER_SETTING1`, `USER_SETTING2` - and
