@@ -4,10 +4,12 @@ WF-LC900 (LinkBuds Clip)
 Tested on firmware 2.0.3, MDR V2 (protocol `0x03003015`), with both command tables
 enabled. The device reports its model name as `LinkBuds Clip` and its series as
 `ModelSeries::LINK_BUDS` (`0x60`). Packet captures:
-[`tests/WF-LC900-2.0.3/`](../../tests/WF-LC900-2.0.3/) (initialization and sync) and
+[`tests/WF-LC900-2.0.3/`](../../tests/WF-LC900-2.0.3/) (initialization and sync),
 [`tests/WF-LC900-2.0.3-listening/`](../../tests/WF-LC900-2.0.3-listening/) (every listening
-mode and every background-music distance). Paired device names, their addresses and track
-metadata are replaced with placeholders in both.
+mode and every background-music distance) and
+[`tests/WF-LC900-2.0.3-equalizer/`](../../tests/WF-LC900-2.0.3-equalizer/) (the preset
+capability, and Heavy, Clear, Hard and Soft applied in turn). Paired device names, their
+addresses and track metadata are replaced with placeholders in all three.
 
 **NOTE:** **✅**: Supported, ❌: Unsupported, **?**: Untested, **~**: Supported officially, pending implementation.
 
@@ -63,8 +65,8 @@ Notes:
   reach the client through `MDREqualizer.available` and `MDREqualizer.dsee_available`, which
   are about what the device will act on right now - `MDR_FEATURE_EQUALIZER` and
   `MDR_FEATURE_DSEE` stay set throughout, because the hardware still has both.
-- **The equalizer preset list** comes from `EQEBB_GET_CAPABILITY PRESET_EQ`, which the
-  captures above predate. The device answers with `band` 10, `step` 13 and eight presets -
+- **The equalizer preset list** comes from `EQEBB_GET_CAPABILITY PRESET_EQ`, which the first
+  two captures predate. The device answers with `band` 10, `step` 13 and eight presets -
   `OFF`, `HEAVY`, `CLEAR`, `HARD`, `SOFT`, `CUSTOM`, `USER_SETTING1`, `USER_SETTING2` - and
   **an empty name for every one of them**, so `MDR_TEXT_EQUALIZER_PRESET_NAME` is empty here
   and a UI needs its own labels. Ten bands of thirteen steps is the ±6 range libmdr assumes
