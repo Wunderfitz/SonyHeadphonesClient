@@ -567,7 +567,24 @@ namespace mdr
             state.mPlayControl.override(t1::PlaybackControl::KEY_OFF);
         }
 
-        if (state.mEqPresetId.pending() || state.mEqConfig.pending() || state.mEqClearBass.pending())
+        /*
+         * As in RequestCommitV2, and more sharply here: this frame carries the preset and every
+         * band step together, so re-sending a snapshot the device has already moved past puts
+         * both back. pending() says the device does not have what was submitted; dirty() says
+         * the caller asked for it, since overwrite() keeps `desired` in step with `current`
+         * while nothing is staged. Only the second is reason to transmit.
+         */
+        const bool eqPending = state.mEqPresetId.pending() || state.mEqConfig.pending() ||
+            state.mEqClearBass.pending();
+        const bool eqAsked = state.mEqPresetId.dirty() || state.mEqConfig.dirty() ||
+            state.mEqClearBass.dirty();
+        if (eqPending && !eqAsked)
+        {
+            state.mEqPresetId.override(state.mEqPresetId.current);
+            state.mEqConfig.override(state.mEqConfig.current);
+            state.mEqClearBass.override(state.mEqClearBass.current);
+        }
+        else if (eqPending)
         {
             if (state.mSupport.contains(t1::FunctionType::PRESET_EQ))
             {

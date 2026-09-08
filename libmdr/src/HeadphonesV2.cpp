@@ -721,7 +721,27 @@ namespace mdr
             // Ask for a equalizer param update afterwards
             SendCommandACK(EqEbbGetParam);
         }
-        if (state.mEqConfig.pending() || state.mEqClearBass.pending())
+        /*
+         * pending() alone is not enough to justify a band write. The device recomputes the band
+         * steps for a preset it was just given and reports them while this pass is still
+         * running - the request above asks it to - so `current` moves, and a band config nobody
+         * touched starts to look like a write waiting to go out. Sending that snapshot is
+         * exactly how choosing a preset ends up on CUSTOM with the curve that was on screen
+         * beforehand: band steps are what makes an EQ custom.
+         *
+         * dirty() is the caller's intent rather than the device's movement. overwrite() keeps
+         * `desired` in step with `current` while nothing is staged, so a device-side update
+         * leaves it false, and only an actual mdrHeadphonesSetEqualizerBands makes it true.
+         */
+        const bool eqBandsPending = state.mEqConfig.pending() || state.mEqClearBass.pending();
+        const bool eqBandsAsked = state.mEqConfig.dirty() || state.mEqClearBass.dirty();
+        if (eqBandsPending && !eqBandsAsked)
+        {
+            /* Follow the device rather than putting a stale copy of it back. */
+            state.mEqConfig.override(state.mEqConfig.current);
+            state.mEqClearBass.override(state.mEqClearBass.current);
+        }
+        else if (eqBandsPending)
         {
             using namespace t1;
             EqEbbSetParamEq res;

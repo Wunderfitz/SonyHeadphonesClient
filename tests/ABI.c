@@ -751,6 +751,7 @@ typedef struct RequestLog
     unsigned char command;
     unsigned char inquired;
     int has_inquired;
+    size_t payload_size;
 } RequestLog;
 
 typedef struct Device
@@ -762,6 +763,10 @@ typedef struct Device
     size_t table1_size;
     const unsigned char* table2;
     size_t table2_size;
+    /* When set, every EQEBB_SET_PARAM is answered the way a real device answers a preset
+     * change: with the band steps it computed for that preset. */
+    const unsigned char* eq_notification;
+    size_t eq_notification_size;
     RequestLog log[REQUEST_LOG_CAPACITY];
     size_t log_size;
 } Device;
@@ -797,6 +802,7 @@ static void device_pump(Device* device)
             entry->command = frame.payload[0];
             entry->has_inquired = frame.payload_size > 1;
             entry->inquired = entry->has_inquired ? frame.payload[1] : 0;
+            entry->payload_size = frame.payload_size;
         }
 
         ack_size = pack_frame(MDR_DATA_TYPE_ACK, (unsigned char)(1 - frame.sequence), NULL, 0, ack);
@@ -817,6 +823,16 @@ static void device_pump(Device* device)
                 device_send(device, MDR_DATA_TYPE_DATA_MDR, device->table1, device->table1_size);
             else
                 device_send(device, MDR_DATA_TYPE_DATA_MDR_NO2, device->table2, device->table2_size);
+        }
+        else if (table == 1 && frame.payload[0] == 0x58 && device->eq_notification != NULL)
+        {
+            /* EQEBB_SET_PARAM */
+            device_send(
+                device,
+                MDR_DATA_TYPE_DATA_MDR,
+                device->eq_notification,
+                device->eq_notification_size
+            );
         }
     }
 }
@@ -1299,6 +1315,136 @@ static void test_equalizer_presets_follow_the_capability(void)
     session_close(&session);
 }
 
+/*
+ * Picking a preset used to land on CUSTOM with a flat curve. The device recomputes the band
+ * steps for the preset and reports them while the commit is still running, which moves the band
+ * config's `current` away from the values submitted at the top of that pass - making a config
+ * nobody touched look pending, and sending it. Band steps are what makes an EQ custom, so the
+ * device dutifully switched to CUSTOM and threw the preset away. Observed on a WF-LC900 for
+ * Heavy, Clear, Hard and Soft alike.
+ */
+static void test_preset_change_does_not_write_bands(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x01,
+        0x50, 0xff /* PRESET_EQ */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+    /* EQEBB_RET_PARAM: preset OFF, ten bands, all flat - the state the device starts in. */
+    static const unsigned char flat[] = {
+        0x57, 0x00, 0x00, 0x0a,
+        0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06
+    };
+    /* EQEBB_NTFY_PARAM: Heavy, and the curve the device computed for it. */
+    static const unsigned char heavy[] = {
+        0x59, 0x00, 0x30, 0x0a,
+        0x0a, 0x0a, 0x05, 0x05, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06
+    };
+    static const int8_t heavy_bands[] = {4, 4, -1, -1, 0, 0, 0, 0, 0, 0};
+
+    Session session;
+    Device device;
+    MDREqualizer equalizer;
+    int8_t bands[16];
+    uint32_t count;
+    size_t index;
+    int band_writes = 0;
+    int i;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, flat, sizeof(flat));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "the starting curve polls");
+
+    /* From here the device answers any EQEBB_SET_PARAM the way the hardware does. */
+    device.eq_notification = heavy;
+    device.eq_notification_size = sizeof(heavy);
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable"
+    );
+    equalizer.preset = MDR_EQ_HEAVY;
+    check_result(
+        mdrHeadphonesSetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "the preset stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the preset change starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the preset change completes");
+
+    for (index = 0; index < device.log_size; ++index)
+    {
+        const RequestLog* entry = &device.log[index];
+        /*
+         * EQEBB_SET_PARAM carrying band steps. A preset-only write is four bytes - command,
+         * inquired type, preset id, and the zero count of an empty band array - so anything
+         * longer is a curve.
+         */
+        if (entry->table == 1 && entry->command == 0x58 && entry->payload_size > 4)
+            ++band_writes;
+    }
+    check(band_writes == 0, "a preset change writes no band steps");
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable after the change"
+    );
+    check(equalizer.preset == MDR_EQ_HEAVY, "the preset the device reported is the one that stands");
+
+    count = sizeof(bands);
+    check_result(
+        mdrHeadphonesGetEqualizerBands(session.headphones, bands, &count),
+        MDR_RESULT_OK,
+        "the bands are readable after the change"
+    );
+    check_result((MDRResult)count, 10, "the device's band count stands");
+    for (i = 0; i < 10; ++i)
+        check(bands[i] == heavy_bands[i], "the preset's own curve stands");
+
+    /* An actual band edit still goes out - the guard is about intent, not about the preset. */
+    band_writes = 0;
+    device.eq_notification = NULL;
+    for (i = 0; i < 10; ++i)
+        bands[i] = 1;
+    check_result(
+        mdrHeadphonesSetEqualizerBands(session.headphones, bands, 10),
+        MDR_RESULT_OK,
+        "a band edit stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the band edit starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the band edit completes");
+    for (index = 0; index < device.log_size; ++index)
+    {
+        const RequestLog* entry = &device.log[index];
+        if (entry->table == 1 && entry->command == 0x58 && entry->payload_size > 4)
+            ++band_writes;
+    }
+    check(band_writes == 1, "an edited band config is transmitted");
+    session_close(&session);
+}
+
 static void test_poll_events(void)
 {
     Session session;
@@ -1467,6 +1613,7 @@ int main(void)
     test_listening_modes();
     test_equalizer_availability_follows_the_device();
     test_equalizer_presets_follow_the_capability();
+    test_preset_change_does_not_write_bands();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();

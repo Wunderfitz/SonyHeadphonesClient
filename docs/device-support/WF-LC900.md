@@ -71,6 +71,12 @@ Notes:
   **an empty name for every one of them**, so `MDR_TEXT_EQUALIZER_PRESET_NAME` is empty here
   and a UI needs its own labels. Ten bands of thirteen steps is the ±6 range libmdr assumes
   for a ten-band device, confirmed rather than inferred.
+- **Applying a preset must not carry band steps.** The device recomputes the curve for the
+  preset it was given and notifies it; band steps sent alongside are what defines a *custom*
+  EQ, so it answers by switching to `CUSTOM` and dropping the preset. The equalizer capture
+  above was taken before the commit paths learned to tell the caller's intent from the
+  device's own report, so the device's switch to `CUSTOM` after each of Heavy, Clear, Hard
+  and Soft is in it.
 - **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so the
   Cinema mode does not exist here and is no longer offered. In the capture above, taken
   before the per-mode gating existed, the request is acknowledged and then never answered.
