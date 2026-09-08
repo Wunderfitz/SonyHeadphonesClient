@@ -424,6 +424,32 @@ mdr::Vector<int> GetEqualizerBands()
     return values;
 }
 
+/*
+ * The presets this device advertised, with the names it gave them. Empty means it never said -
+ * an equalizer whose capability carries no list, or one that has not answered - and the picker
+ * falls back to everything libmdr can encode there.
+ */
+mdr::Vector<std::pair<MDREqualizerPreset, mdr::String>> GetEqualizerPresets()
+{
+    uint32_t count = 0;
+    if (!gDevice || mdrHeadphonesGetEqualizerPresets(gDevice, nullptr, &count) != MDR_RESULT_OK || count == 0)
+        return {};
+    mdr::Vector<MDREqualizerPreset> ids(count);
+    if (mdrHeadphonesGetEqualizerPresets(gDevice, ids.data(), &count) != MDR_RESULT_OK)
+        return {};
+    mdr::Vector<std::pair<MDREqualizerPreset, mdr::String>> presets;
+    presets.reserve(count);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        // An id libmdr cannot address keeps its place in the device's list, and so in the name
+        // index, but there is nothing to select - so it is dropped here rather than shown.
+        if (ids[i] == MDR_EQ_UNKNOWN)
+            continue;
+        presets.emplace_back(ids[i], GetText(MDR_TEXT_EQUALIZER_PRESET_NAME, i));
+    }
+    return presets;
+}
+
 void SetEqualizerBands(const mdr::Vector<int>& values)
 {
     mdr::Vector<int8_t> bytes;
@@ -444,6 +470,7 @@ struct ClientState
     MDRListening mListening{};
     MDREqualizer mEqualizer{};
     mdr::Vector<int> mEqualizerBands;
+    mdr::Vector<std::pair<MDREqualizerPreset, mdr::String>> mEqualizerPresets;
     mdr::Vector<MDRPairedDevice> mPairedDevices;
     MDRPairing mPairing{};
     mdr::Vector<std::pair<MDRGeneralSettingInfo, MDRGeneralSetting>> mGeneralSettings;
@@ -481,6 +508,7 @@ void RefreshClientState()
     gState.mListeningAvailable = mdrHeadphonesGetListening(gDevice, &gState.mListening) == MDR_RESULT_OK;
     gState.mEqualizerAvailable = mdrHeadphonesGetEqualizer(gDevice, &gState.mEqualizer) == MDR_RESULT_OK;
     gState.mEqualizerBands = GetEqualizerBands();
+    gState.mEqualizerPresets = GetEqualizerPresets();
     gState.mPairedDevices = GetPairedDevices();
     gState.mPairingAvailable = mdrHeadphonesGetPairing(gDevice, &gState.mPairing) == MDR_RESULT_OK;
     gState.mGeneralSettings = GetGeneralSettings(GetGeneralSettingInfos());
@@ -1471,13 +1499,28 @@ void DrawDeviceControlsSound()
     if (ImGui::TreeNodeEx("Equalizer & DSEE", ImGuiTreeNodeFlags_DefaultOpen))
     {
         bool changed = false;
-        constexpr MDREqualizerPreset kSelections[] = {
+        // Everything libmdr can encode, for a device that never sent a capability list. A device
+        // that did offers a small subset of this, and mdrHeadphonesSetEqualizer refuses the rest.
+        static constexpr MDREqualizerPreset kAllPresets[] = {
             MDR_EQ_OFF, MDR_EQ_ROCK, MDR_EQ_POP, MDR_EQ_JAZZ, MDR_EQ_DANCE, MDR_EQ_EDM,
             MDR_EQ_R_AND_B_HIP_HOP, MDR_EQ_ACOUSTIC, MDR_EQ_BRIGHT, MDR_EQ_EXCITED, MDR_EQ_MELLOW,
             MDR_EQ_RELAXED, MDR_EQ_VOCAL, MDR_EQ_TREBLE, MDR_EQ_BASS, MDR_EQ_SPEECH, MDR_EQ_HEAVY,
             MDR_EQ_CLEAR, MDR_EQ_HARD, MDR_EQ_SOFT, MDR_EQ_GAMING, MDR_EQ_FPS_1, MDR_EQ_FPS_2,
             MDR_EQ_FPS_3, MDR_EQ_CUSTOM, MDR_EQ_USER_1, MDR_EQ_USER_2, MDR_EQ_USER_3, MDR_EQ_USER_4,
             MDR_EQ_USER_5};
+        mdr::Vector<MDREqualizerPreset> selections;
+        for (const auto& [id, name] : gState.mEqualizerPresets)
+            selections.push_back(id);
+        if (selections.empty())
+            selections.assign(std::begin(kAllPresets), std::end(kAllPresets));
+        // Sony's own name for a preset where the device sent one; they are what its app shows.
+        const auto formatPreset = [](MDREqualizerPreset id) -> const char*
+        {
+            for (const auto& [advertised, name] : gState.mEqualizerPresets)
+                if (advertised == id && !name.empty())
+                    return name.c_str();
+            return FormatEqualizerPreset(id);
+        };
         // Devices switch these off while a listening mode is active and say so; without
         // that, the controls would look live while the device ignores every change.
         const bool equalizerUsable =
@@ -1488,7 +1531,7 @@ void DrawDeviceControlsSound()
             ImGui::TextDisabled("Unavailable while a listening mode other than Standard is active.");
         ImGui::BeginDisabled(!equalizerUsable);
         changed |= ImComboBoxItems(
-            "Preset", std::span{kSelections}, gState.mEqualizer.preset, FormatEqualizerPreset);
+            "Preset", std::span<const MDREqualizerPreset>{selections}, gState.mEqualizer.preset, formatPreset);
         if (ImEqualizer(gState.mEqualizerBands))
             SetEqualizerBands(gState.mEqualizerBands);
         if (gState.mEqualizerBands.size() == 5)

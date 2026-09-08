@@ -54,11 +54,14 @@ namespace mdr
             if (supportResult != MDR_RESULT_OK)
                 co_return SetLastError(MDR_RESULT_ERROR_NOT_SUPPORTED, "Device failed to respond to support function request");
 
-            /* Equalizer */
-            if (state.mSupport.contains(t1::FunctionType::PRESET_EQ))
+            /* Equalizer - the capability is where the preset list comes from. */
+            if (state.mSupport.contains(t1::FunctionType::PRESET_EQ) ||
+                state.mSupport.contains(t1::FunctionType::PRESET_EQ_NONCUSTOMIZABLE))
             {
                 SendCommandACK(t1::GetEqEbbCapability, {
-                    .type = t1::EqEbbInquiredType::PRESET_EQ,
+                    .type = state.mSupport.contains(t1::FunctionType::PRESET_EQ)
+                        ? t1::EqEbbInquiredType::PRESET_EQ
+                        : t1::EqEbbInquiredType::PRESET_EQ_NONCUSTOMIZABLE,
                     .language = t1::DisplayLanguage::ENGLISH
                 });
             }

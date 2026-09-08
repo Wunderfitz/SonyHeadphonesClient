@@ -186,6 +186,18 @@ namespace mdr
         /* Equalizer */
         if (SupportsFeature(state, MDR_FEATURE_EQUALIZER))
         {
+            /*
+             * Which presets exist is a capability, not a parameter, and the device names them
+             * in a language it has to be told - so this is the language-carrying request, the
+             * same shape the general-setting capabilities above use. Without it the preset id
+             * comes back with nothing saying which ids this device would accept.
+             */
+            t1::EqEbbInquiredType eqType{};
+            if (EqPresetInquiredType(state, eqType))
+                SendCommandACK(t1::EqEbbGetCapabilityLanguage, {
+                               .eqEbbInquiredType = eqType,
+                               .language = t1::DisplayLanguage::ENGLISH
+                               });
             SendCommandACK(t1::EqEbbGetStatus, {.type = t1::EqEbbInquiredType::PRESET_EQ});
             SendCommandACK(t1::EqEbbGetParam);
         }

@@ -902,6 +902,7 @@ static void test_init_skips_unadvertised_functions(void)
 
     device_run_init(&session, &device);
 
+    check(!device_requested(&device, 1, 0x50, -1), "no EQEBB_GET_CAPABILITY without an equalizer");
     check(!device_requested(&device, 1, 0x52, -1), "no EQEBB_GET_STATUS without an equalizer");
     check(!device_requested(&device, 1, 0x56, -1), "no EQEBB_GET_PARAM without an equalizer");
     check(!device_requested(&device, 1, 0xa6, -1), "no PLAY_GET_PARAM without a playback controller");
@@ -947,6 +948,7 @@ static void test_init_requests_advertised_functions(void)
 
     device_run_init(&session, &device);
 
+    check(device_requested(&device, 1, 0x50, 0x00), "EQEBB_GET_CAPABILITY for an advertised equalizer");
     check(device_requested(&device, 1, 0x52, -1), "EQEBB_GET_STATUS for an advertised equalizer");
     check(device_requested(&device, 1, 0xa6, -1), "PLAY_GET_PARAM for an advertised playback controller");
     check(device_requested(&device, 1, 0xa2, -1), "PLAY_GET_STATUS for an advertised playback controller");
@@ -1163,6 +1165,140 @@ static void test_equalizer_availability_follows_the_device(void)
     session_close(&session);
 }
 
+/*
+ * Which presets a device has is a capability, and until it answers, nothing is known: an empty
+ * list has to mean "not said" rather than "none", or a device whose capability carries no list
+ * would look like one with no equalizer at all.
+ */
+static void test_equalizer_presets_follow_the_capability(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x01,
+        0x50, 0xff /* PRESET_EQ */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+    /* EQEBB_RET_CAPABILITY PRESET_EQ: ten bands of thirteen steps, and three named presets. */
+    static const unsigned char capability[] = {
+        0x51, 0x00,
+        0x0a, 0x0d,
+        0x03,
+        0x00, 0x03, 'O', 'f', 'f',
+        0x10, 0x06, 'B', 'r', 'i', 'g', 'h', 't',
+        0xa0, 0x06, 'C', 'u', 's', 't', 'o', 'm'
+    };
+
+    Session session;
+    Device device;
+    MDREqualizer equalizer;
+    MDREqualizerPreset presets[8];
+    uint32_t count;
+    char name[16];
+    uint32_t name_size;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    check(
+        device_requested(&device, 1, 0x50, 0x00),
+        "EQEBB_GET_CAPABILITY PRESET_EQ for an advertised equalizer"
+    );
+
+    count = 0;
+    check_result(
+        mdrHeadphonesGetEqualizerPresets(session.headphones, NULL, &count),
+        MDR_RESULT_OK,
+        "the preset count is readable before the device answers"
+    );
+    check(count == 0, "no presets are known before the device answers");
+
+    /* Nothing has been said, so nothing is refused - the caller is no worse off than before. */
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable"
+    );
+    equalizer.preset = MDR_EQ_ROCK;
+    check_result(
+        mdrHeadphonesSetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "any encodable preset is accepted while the list is unknown"
+    );
+
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, capability, sizeof(capability));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "the preset list polls");
+
+    count = 0;
+    check_result(
+        mdrHeadphonesGetEqualizerPresets(session.headphones, NULL, &count),
+        MDR_RESULT_OK,
+        "the preset count is readable"
+    );
+    check_result((MDRResult)count, 3, "every advertised preset is counted");
+
+    count = 1;
+    check_result(
+        mdrHeadphonesGetEqualizerPresets(session.headphones, presets, &count),
+        MDR_RESULT_ERROR_BUFFER_TOO_SMALL,
+        "a short preset buffer is refused"
+    );
+    check_result((MDRResult)count, 3, "a refused read reports the size it needs");
+
+    count = 8;
+    check_result(
+        mdrHeadphonesGetEqualizerPresets(session.headphones, presets, &count),
+        MDR_RESULT_OK,
+        "the preset list is readable"
+    );
+    check_result((MDRResult)count, 3, "the list holds what the device advertised");
+    check(presets[0] == MDR_EQ_OFF, "the first preset is the one listed first");
+    check(presets[1] == MDR_EQ_BRIGHT, "the second preset is the one listed second");
+    check(presets[2] == MDR_EQ_CUSTOM, "the third preset is the one listed third");
+
+    /* The index into the list is also the index into its names. */
+    name_size = sizeof(name);
+    check_result(
+        mdrHeadphonesGetText(session.headphones, MDR_TEXT_EQUALIZER_PRESET_NAME, 1, name, &name_size),
+        MDR_RESULT_OK,
+        "a preset name is readable"
+    );
+    check(strcmp(name, "Bright") == 0, "the name is the one the device gave that preset");
+    name_size = sizeof(name);
+    check_result(
+        mdrHeadphonesGetText(session.headphones, MDR_TEXT_EQUALIZER_PRESET_NAME, 3, name, &name_size),
+        MDR_RESULT_ERROR_NOT_FOUND,
+        "a name past the end of the list is not found"
+    );
+
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable once the list is known"
+    );
+    equalizer.preset = MDR_EQ_BRIGHT;
+    check_result(
+        mdrHeadphonesSetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "an advertised preset is accepted"
+    );
+    equalizer.preset = MDR_EQ_ROCK;
+    check_result(
+        mdrHeadphonesSetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_ERROR_NOT_SUPPORTED,
+        "a preset the device never listed is refused"
+    );
+    session_close(&session);
+}
+
 static void test_poll_events(void)
 {
     Session session;
@@ -1330,6 +1466,7 @@ int main(void)
     test_init_requests_advertised_functions();
     test_listening_modes();
     test_equalizer_availability_follows_the_device();
+    test_equalizer_presets_follow_the_capability();
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();

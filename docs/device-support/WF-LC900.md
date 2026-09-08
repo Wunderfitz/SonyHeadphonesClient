@@ -63,6 +63,12 @@ Notes:
   reach the client through `MDREqualizer.available` and `MDREqualizer.dsee_available`, which
   are about what the device will act on right now - `MDR_FEATURE_EQUALIZER` and
   `MDR_FEATURE_DSEE` stay set throughout, because the hardware still has both.
+- **The equalizer preset list** comes from `EQEBB_GET_CAPABILITY PRESET_EQ`, which the
+  captures above predate. The device answers with `band` 10, `step` 13 and eight presets -
+  `OFF`, `HEAVY`, `CLEAR`, `HARD`, `SOFT`, `CUSTOM`, `USER_SETTING1`, `USER_SETTING2` - and
+  **an empty name for every one of them**, so `MDR_TEXT_EQUALIZER_PRESET_NAME` is empty here
+  and a UI needs its own labels. Ten bands of thirteen steps is the ±6 range libmdr assumes
+  for a ten-band device, confirmed rather than inferred.
 - **Cinema Upmix**: the device advertises `LISTENING_OPTION` but not `UPMIX_CINEMA`, so the
   Cinema mode does not exist here and is no longer offered. In the capture above, taken
   before the per-mode gating existed, the request is acknowledged and then never answered.
