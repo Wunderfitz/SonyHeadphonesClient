@@ -1041,6 +1041,29 @@ namespace mdr
         co_return MDR_EVENT_APPLY_COMPLETE;
     }
 
+    MDRTask MDRHeadphones::RequestAlertResponseV2(int action)
+    {
+        auto& state = mDetailsV2;
+        if (!state.mAlertAwaitingResponse)
+            co_return SetLastError(MDR_RESULT_ERROR_NOT_FOUND, "The device has not asked anything");
+
+        // Cleared before the send, not after it: the question has been dealt with either way,
+        // and a failure here must not leave an answer owed for a message the device has since
+        // forgotten. It asks again if it still wants to know.
+        state.mAlertAwaitingResponse = false;
+
+        using namespace t1;
+        AlertSetParamFixedMessage res;
+        res.type = AlertInquiredType::FIXED_MESSAGE;
+        // Echoed back rather than assumed: the device pairs its answer with the question it
+        // asked, and the whole point of the exchange is which held request this applies to.
+        res.messageType = state.mLastAlertMessage;
+        res.actionType = action == MDR_ALERT_ACTION_POSITIVE ? AlertAction::POSITIVE
+                                                             : AlertAction::NEGATIVE;
+        SendCommandACK(AlertSetParamFixedMessage, res);
+        co_return MDR_EVENT_APPLY_COMPLETE;
+    }
+
     int MDRHeadphones::HandleProtocolInfoV2(Span<const UInt8> command)
     {
         auto& state = mDetailsV2;
