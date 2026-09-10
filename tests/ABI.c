@@ -765,6 +765,11 @@ typedef struct RequestLog
     unsigned char command;
     unsigned char inquired;
     int has_inquired;
+    /* The byte after the inquired type. On a playback request it says which detail was
+     * asked for - the track name, the album, the artist - which is the whole of what a
+     * sync has to get right. */
+    unsigned char detail;
+    int has_detail;
     size_t payload_size;
 } RequestLog;
 
@@ -822,6 +827,8 @@ static void device_pump(Device* device)
             entry->command = frame.payload[0];
             entry->has_inquired = frame.payload_size > 1;
             entry->inquired = entry->has_inquired ? frame.payload[1] : 0;
+            entry->has_detail = frame.payload_size > 2;
+            entry->detail = entry->has_detail ? frame.payload[2] : 0;
             entry->payload_size = frame.payload_size;
         }
 
@@ -1861,6 +1868,113 @@ static void test_v1_voice_guidance_detail_is_not_the_switch(void)
     session_close(&session);
 }
 
+/* Whether a request of that shape was transmitted at or after `from`. */
+static int device_requested_after(const Device* device, unsigned char table, unsigned char command, size_t from)
+{
+    size_t index;
+
+    for (index = from; index < device->log_size; ++index)
+        if (device->log[index].table == table && device->log[index].command == command)
+            return 1;
+    return 0;
+}
+
+/* Track, album and artist names asked for by a V1 sync, which names each one separately. */
+static int sync_asked_for_names(const Device* device, size_t from)
+{
+    size_t index;
+    int track = 0;
+    int album = 0;
+    int artist = 0;
+
+    for (index = from; index < device->log_size; ++index)
+    {
+        const RequestLog* entry = &device->log[index];
+        if (entry->table != 1 || entry->command != 0xa6 || !entry->has_detail) /* PLAY_GET_PARAM */
+            continue;
+        track = track || entry->detail == 0x00;  /* TRACK_NAME */
+        album = album || entry->detail == 0x01;  /* ALBUM_NAME */
+        artist = artist || entry->detail == 0x02; /* ARTIST_NAME */
+    }
+    return track && album && artist;
+}
+
+/*
+ * A sync is the caller's way of saying "ask about everything again", and RequestSyncV1 asked
+ * for nothing at all - it returned completion without sending a command. Most of the state
+ * survives that, because a headset announces its own changes, but the playback metadata does
+ * not: the phone hands the headset a new track name over its own channel and says nothing on
+ * the control link, so a name read back after the first track is the one initialization got.
+ */
+static void test_v1_sync_asks_for_the_track_names(void)
+{
+    /* PLAYBACK_CONTROLLER only. */
+    static const unsigned char table1[] = {0x07, 0x00, 0x01, 0xa1};
+
+    Session session;
+    Device device;
+    size_t after_init;
+
+    if (!session_open_family(&session, MDR_PROTOCOL_V1))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.protocol_v1 = 1;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+
+    device_run_init(&session, &device);
+
+    /* Initialization asks for the names once; only what a sync asks for counts here. */
+    after_init = device.log_size;
+    check_result(
+        mdrHeadphonesRequestSync(session.headphones),
+        MDR_RESULT_OK,
+        "a sync starts"
+    );
+    device_run(&session, &device, MDR_EVENT_SYNC_COMPLETE, "the sync completes");
+    check(sync_asked_for_names(&device, after_init), "a V1 sync asks for the track names again");
+    session_close(&session);
+}
+
+/* The same gap on the V2 side, where the sync asked for battery and safe listening only. */
+static void test_v2_sync_asks_for_the_track_names(void)
+{
+    /* PLAYBACK_CONTROLLER_WITH_CALL_VOLUME_ADJUSTMENT only. */
+    static const unsigned char table1[] = {0x07, 0x00, 0x01, 0xa1, 0xff};
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+
+    Session session;
+    Device device;
+    size_t after_init;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    after_init = device.log_size;
+    check_result(
+        mdrHeadphonesRequestSync(session.headphones),
+        MDR_RESULT_OK,
+        "a sync starts"
+    );
+    device_run(&session, &device, MDR_EVENT_SYNC_COMPLETE, "the sync completes");
+    /* V2 names no detail: one PLAY_GET_PARAM for the playback control brings the metadata
+     * back with it, which is why this asks only that the request was made again. */
+    check(
+        device_requested_after(&device, 1, 0xa6, after_init), /* PLAY_GET_PARAM */
+        "a V2 sync asks for the playback state again"
+    );
+    session_close(&session);
+}
+
 int main(void)
 {
     test_abi_version_handshake();
@@ -1881,6 +1995,8 @@ int main(void)
     test_newer_staging_survives_apply();
     test_connection_mode_names_its_inquired_type();
     test_v1_voice_guidance_detail_is_not_the_switch();
+    test_v1_sync_asks_for_the_track_names();
+    test_v2_sync_asks_for_the_track_names();
 
     if (g_failures != 0)
         fprintf(stderr, "%d test assertion(s) failed\n", g_failures);
