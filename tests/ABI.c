@@ -1724,6 +1724,69 @@ static void test_newer_staging_survives_apply(void)
     session_close(&session);
 }
 
+/*
+ * A connection-quality write has to name the inquired type it is setting. AUDIO_SET_PARAM
+ * carries one, and AudioSetParamConnection's default is CONNECTION_MODE_CLASSIC_AUDIO_LE_AUDIO
+ * - a different variant of the same command, with a field this one does not carry - so a
+ * write that leaves the field alone asks the device for something it never advertised. The
+ * framing layer acknowledges the frame either way, the payload is dropped, and the setting
+ * reads back unchanged with nothing to say why.
+ */
+static void test_connection_mode_names_its_inquired_type(void)
+{
+    static const unsigned char table1[] = {
+        0x07, 0x00, 0x01,
+        0xe1, 0xff /* CONNECTION_MODE_SOUND_QUALITY_CONNECTION_QUALITY */
+    };
+    static const unsigned char table2[] = {0x07, 0x00, 0x00};
+
+    Session session;
+    Device device;
+    MDRConnectionMode mode;
+    size_t index;
+    int writes = 0;
+    int misdirected = 0;
+
+    if (!session_open(&session))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+    device.table2 = table2;
+    device.table2_size = sizeof(table2);
+
+    device_run_init(&session, &device);
+
+    memset(&mode, 0, sizeof(mode));
+    mode.audio_priority = MDR_AUDIO_PRIORITY_STABILITY;
+    check_result(
+        mdrHeadphonesSetConnectionMode(session.headphones, &mode),
+        MDR_RESULT_OK,
+        "the connection mode stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the connection mode change starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the connection mode change completes");
+
+    for (index = 0; index < device.log_size; ++index)
+    {
+        const RequestLog* entry = &device.log[index];
+        if (entry->table != 1 || entry->command != 0xe8) /* AUDIO_SET_PARAM */
+            continue;
+        ++writes;
+        /* CONNECTION_MODE, the type the advertised function owns and GET_PARAM reads on. */
+        if (!entry->has_inquired || entry->inquired != 0x00)
+            ++misdirected;
+    }
+    check(writes == 1, "the connection quality is written once");
+    check(misdirected == 0, "it is written on the inquired type the device advertised");
+    session_close(&session);
+}
+
 int main(void)
 {
     test_abi_version_handshake();
@@ -1742,6 +1805,7 @@ int main(void)
     test_transmit_sequence_ignores_inbound_frames();
     test_v2_bootstrap();
     test_newer_staging_survives_apply();
+    test_connection_mode_names_its_inquired_type();
 
     if (g_failures != 0)
         fprintf(stderr, "%d test assertion(s) failed\n", g_failures);

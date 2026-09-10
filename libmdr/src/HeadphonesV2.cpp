@@ -812,6 +812,11 @@ namespace mdr
             {
                 AudioSetParamConnection res;
                 res.command = Command::AUDIO_SET_PARAM;
+                // Assigned rather than left to the struct's default, which is
+                // CONNECTION_MODE_CLASSIC_AUDIO_LE_AUDIO - a different inquired type with a
+                // field this one does not carry. CONNECTION_MODE is the one the capability
+                // above advertises and the one AudioGetParam reads back on.
+                res.type = AudioInquiredType::CONNECTION_MODE;
                 res.settingValue = state.mAudioPriorityMode.submitted;
                 SendCommandACK(AudioSetParamConnection, res);
             }
