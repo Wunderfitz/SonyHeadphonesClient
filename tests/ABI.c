@@ -192,16 +192,21 @@ static void mock_append(MockTransport* transport, const unsigned char* data, siz
     transport->rx_size += size;
 }
 
-static int session_open(Session* session)
+static int session_open_family(Session* session, MDRProtocolVersion family)
 {
     memset(session, 0, sizeof(*session));
     mock_init(&session->transport);
     check_result(
-        mdrHeadphonesCreate(MDR_ABI_VERSION, &session->transport.connection, MDR_PROTOCOL_V2, &session->headphones),
+        mdrHeadphonesCreate(MDR_ABI_VERSION, &session->transport.connection, family, &session->headphones),
         MDR_RESULT_OK,
         "opaque headphones session opens"
     );
     return session->headphones != NULL;
+}
+
+static int session_open(Session* session)
+{
+    return session_open_family(session, MDR_PROTOCOL_V2);
 }
 
 static void session_close(Session* session)
@@ -400,6 +405,15 @@ static const unsigned char k_v2_protocol_info[] = {
 /* As above, but with the table 2 support byte set to ENABLE rather than DISABLE. */
 static const unsigned char k_v2_protocol_info_both_tables[] = {
     0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00
+};
+
+/*
+ * V1's reply is four bytes rather than eight: command, inquired type, and a big-endian
+ * protocol version. It says nothing about tables - V1 works out whether it has a second one
+ * from the advertised function list (see RefreshSupportV1).
+ */
+static const unsigned char k_v1_protocol_info[] = {
+    0x01, 0x00, 0x00, 0x01
 };
 
 static void select_v2(Session* session, const char* message)
@@ -770,6 +784,9 @@ typedef struct Device
     /* When set, the device answers a status request the way one that has just switched a
      * listening mode on does: with both the equalizer and the upscaling turned off. */
     int answer_status_disabled;
+    /* When set, the handshake is answered the way a V1 headset answers it, and the device
+     * replies to voice-guidance requests. Pair it with session_open_family(MDR_PROTOCOL_V1). */
+    int protocol_v1;
     RequestLog log[REQUEST_LOG_CAPACITY];
     size_t log_size;
 } Device;
@@ -813,12 +830,32 @@ static void device_pump(Device* device)
 
         if (table == 1 && frame.payload[0] == 0x00) /* CONNECT_GET_PROTOCOL_INFO */
         {
-            device_send(
-                device,
-                MDR_DATA_TYPE_DATA_MDR,
-                k_v2_protocol_info_both_tables,
-                sizeof(k_v2_protocol_info_both_tables)
-            );
+            if (device->protocol_v1)
+                device_send(device, MDR_DATA_TYPE_DATA_MDR, k_v1_protocol_info, sizeof(k_v1_protocol_info));
+            else
+                device_send(
+                    device,
+                    MDR_DATA_TYPE_DATA_MDR,
+                    k_v2_protocol_info_both_tables,
+                    sizeof(k_v2_protocol_info_both_tables)
+                );
+        }
+        /*
+         * Voice guidance, answered the way a headset answers it: about the detail that was
+         * asked for. Initialization asks about the switch, the language, the required time
+         * and the download server in turn, so most of these replies are not the switch -
+         * which is exactly the case that used to be read as one.
+         */
+        else if (device->protocol_v1 && table == 2 && frame.payload_size > 2
+                 && (frame.payload[0] == 0x46 || frame.payload[0] == 0x42))
+        {
+            const unsigned char reply[4] = {
+                (unsigned char)(frame.payload[0] + 1u), /* GET_PARAM -> RET_PARAM, likewise status */
+                frame.payload[1],
+                frame.payload[2],
+                0x00
+            };
+            device_send(device, MDR_DATA_TYPE_DATA_MDR_NO2, reply, sizeof(reply));
         }
         else if (frame.payload[0] == 0x06) /* CONNECT_GET_SUPPORT_FUNCTION */
         {
@@ -1787,6 +1824,43 @@ static void test_connection_mode_names_its_inquired_type(void)
     session_close(&session);
 }
 
+/*
+ * A voice-guidance reply says which detail it carries, and only one of them is the on/off
+ * switch. Initialization asks about the language, the required time and the download server
+ * as well, so most of the replies it provokes are not the switch - and reading one as the
+ * switch fails validation inside RequestInit, which takes the whole connection down: no
+ * battery, no listening modes, nothing. Reported against a WH-1000XM4.
+ */
+static void test_v1_voice_guidance_detail_is_not_the_switch(void)
+{
+    /* VOICE_GUIDANCE only - which is also what gives this device a second table. */
+    static const unsigned char table1[] = {0x07, 0x00, 0x01, 0x39};
+
+    Session session;
+    Device device;
+
+    if (!session_open_family(&session, MDR_PROTOCOL_V1))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.protocol_v1 = 1;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+
+    /* The device answers every voice-guidance question, including the ones about a detail
+     * this library keeps nothing for. Initialization has to survive all of them. */
+    device_run_init(&session, &device);
+    check(
+        mdrHeadphonesIsInitialized(session.headphones) != MDR_FALSE,
+        "a reply about a detail other than the switch does not end the session"
+    );
+    check(
+        device_requested(&device, 2, 0x46, 0x01), /* VOICE_GUIDANCE_GET_PARAM, VOICE_GUIDANCE_SETTING */
+        "the voice-guidance parameters were asked for at all"
+    );
+    session_close(&session);
+}
+
 int main(void)
 {
     test_abi_version_handshake();
@@ -1806,6 +1880,7 @@ int main(void)
     test_v2_bootstrap();
     test_newer_staging_survives_apply();
     test_connection_mode_names_its_inquired_type();
+    test_v1_voice_guidance_detail_is_not_the_switch();
 
     if (g_failures != 0)
         fprintf(stderr, "%d test assertion(s) failed\n", g_failures);
