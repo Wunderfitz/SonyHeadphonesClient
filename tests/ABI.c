@@ -1975,6 +1975,123 @@ static void test_v2_sync_asks_for_the_track_names(void)
     session_close(&session);
 }
 
+/*
+ * EQEBB_SET_PARAM carries a preset and band steps together, and RequestCommitV1 always sent
+ * both: the preset that was staged, followed by every band step as it stood. A V1 device
+ * takes one of them at a time. A WH-1000XM4 acknowledges a frame carrying both and drops it,
+ * keeping the preset and the curve it already had, so neither a preset change nor a band
+ * move ever took. Reported against that headset.
+ */
+static void test_v1_preset_and_curve_never_share_a_frame(void)
+{
+    /* PRESET_EQ only. */
+    static const unsigned char table1[] = {0x07, 0x00, 0x01, 0x51};
+    /* EQEBB_RET_PARAM PRESET_EQ: preset OFF, then six flat steps - a V1 frame counts clear
+     * bass as the first of its band steps, so this is clear bass and five bands. */
+    static const unsigned char flat[] = {
+        0x57, 0x01, 0x00, 0x06,
+        0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a
+    };
+
+    Session session;
+    Device device;
+    MDREqualizer equalizer;
+    int8_t bands[8];
+    size_t index;
+    size_t after;
+    int frames = 0;
+    int carried_steps = 0;
+    int named_a_preset = 0;
+    int i;
+
+    if (!session_open_family(&session, MDR_PROTOCOL_V1))
+        return;
+    memset(&device, 0, sizeof(device));
+    device.transport = &session.transport;
+    device.protocol_v1 = 1;
+    device.table1 = table1;
+    device.table1_size = sizeof(table1);
+
+    device_run_init(&session, &device);
+
+    device_send(&device, MDR_DATA_TYPE_DATA_MDR, flat, sizeof(flat));
+    device_run(&session, &device, MDR_EVENT_EQUALIZER_CHANGED, "the starting curve polls");
+
+    /* A preset change goes out as the preset alone. */
+    after = device.log_size;
+    memset(&equalizer, 0, sizeof(equalizer));
+    check_result(
+        mdrHeadphonesGetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "equalizer is readable"
+    );
+    equalizer.preset = MDR_EQ_BASS;
+    check_result(
+        mdrHeadphonesSetEqualizer(session.headphones, &equalizer),
+        MDR_RESULT_OK,
+        "the preset stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the preset change starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the preset change completes");
+
+    for (index = after; index < device.log_size; ++index)
+    {
+        const RequestLog* entry = &device.log[index];
+        if (entry->table != 1 || entry->command != 0x58) /* EQEBB_SET_PARAM */
+            continue;
+        ++frames;
+        /* Command, inquired type, preset id, and the zero count of an empty band array -
+         * anything longer carries a curve. The preset id is the byte the log keeps as the
+         * detail. */
+        if (entry->payload_size > 4)
+            ++carried_steps;
+        if (entry->has_detail && entry->detail == 0x16) /* BASS */
+            ++named_a_preset;
+    }
+    check(frames == 1, "a V1 preset change is one frame");
+    check(carried_steps == 0, "it carries no band steps");
+    check(named_a_preset == 1, "it names the preset that was asked for");
+
+    /* A curve goes out with the preset left UNSPECIFIED, and the device selects CUSTOM. */
+    after = device.log_size;
+    frames = 0;
+    carried_steps = 0;
+    named_a_preset = 0;
+    for (i = 0; i < 5; ++i)
+        bands[i] = 1;
+    check_result(
+        mdrHeadphonesSetEqualizerBands(session.headphones, bands, 5),
+        MDR_RESULT_OK,
+        "a band edit stages"
+    );
+    check_result(
+        mdrHeadphonesRequestCommit(session.headphones),
+        MDR_RESULT_OK,
+        "the band edit starts"
+    );
+    device_run(&session, &device, MDR_EVENT_APPLY_COMPLETE, "the band edit completes");
+
+    for (index = after; index < device.log_size; ++index)
+    {
+        const RequestLog* entry = &device.log[index];
+        if (entry->table != 1 || entry->command != 0x58)
+            continue;
+        ++frames;
+        if (entry->payload_size > 4)
+            ++carried_steps;
+        if (entry->has_detail && entry->detail != 0xff) /* UNSPECIFIED */
+            ++named_a_preset;
+    }
+    check(frames == 1, "a V1 band edit is one frame");
+    check(carried_steps == 1, "it carries the band steps");
+    check(named_a_preset == 0, "it names no preset alongside them");
+    session_close(&session);
+}
+
 int main(void)
 {
     test_abi_version_handshake();
@@ -1997,6 +2114,7 @@ int main(void)
     test_v1_voice_guidance_detail_is_not_the_switch();
     test_v1_sync_asks_for_the_track_names();
     test_v2_sync_asks_for_the_track_names();
+    test_v1_preset_and_curve_never_share_a_frame();
 
     if (g_failures != 0)
         fprintf(stderr, "%d test assertion(s) failed\n", g_failures);
