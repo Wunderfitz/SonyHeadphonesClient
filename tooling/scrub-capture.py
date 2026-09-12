@@ -4,7 +4,10 @@
 A capture carries more than the protocol exchange. `PERI_*_PARAM` holds the paired
 device list - the names and Bluetooth addresses of the phones, laptops and car kits
 the headphones know about - and `PLAY_*_PARAM` holds the track, album and artist
-that were playing. Run this over a capture directory before committing it.
+that were playing. `UPDT_*_PARAM` holds the headset's serial number and a unique id
+for device binding, and a V1 device repeats that id elsewhere and reports a BLE hash
+value in `COMMON_RET_BLUETOOTH_DEVICE_INFO`. Run this over a capture directory
+before committing it.
 
 Placeholders are the same length as what they replace, so every length prefix and
 each frame's size field still hold; only the checksum and the escaping change. The
@@ -34,6 +37,12 @@ TABLE2_TYPES = {0x0E, 0x1E}  # DATA_MDR_NO2, SHOT_MDR_NO2
 CONNECT_RET_CAPABILITY_INFO = 0x03
 PLAY_PARAM_COMMANDS = {0xA7, 0xA9}  # PLAY_RET_PARAM, PLAY_NTFY_PARAM
 PERIPHERAL_PARAM_COMMANDS = {0x37, 0x39}  # PERI_RET_PARAM, PERI_NTFY_PARAM
+# Table 1, and numbered the same in V1 and V2.
+UPDATE_PARAM_COMMANDS = {0x37, 0x39}  # UPDT_RET_PARAM, UPDT_NTFY_PARAM
+UPDATE_IDENTIFIERS = {0x06, 0x0B}  # SERIAL_NUMBER, UNIQUE_ID_FOR_DEVICE_BINDING
+# V1 only; the same number is reserved in V2's table 1.
+COMMON_RET_BLUETOOTH_DEVICE_INFO = 0x1D
+BLE_HASH_VALUE = 0x01
 
 ADDRESS = re.compile(rb"[0-9A-F]{2}(?::[0-9A-F]{2}){5}")
 TRACK_FIELDS = (b"Example Track", b"Example Album", b"Example Artist")
@@ -100,6 +109,7 @@ class Scrubber:
     def __init__(self, keep_device_address=True):
         self.keep_device_address = keep_device_address
         self.addresses = {}
+        self.identifiers = {}
 
     def address(self, value):
         """A stable placeholder per distinct address, so records stay distinguishable."""
@@ -109,10 +119,38 @@ class Scrubber:
     def sweep_addresses(self, payload):
         return ADDRESS.sub(lambda m: self.address(m.group(0)), payload)
 
+    def collect(self, data_type, payload):
+        """First pass: the serial number and the unique id, wherever UPDT_*_PARAM has them.
+
+        They are replaced in every frame, not only where they were found - a V1 device
+        repeats the unique id inside VOICE_GUIDANCE_RET_PARAM - and that frame may come
+        first, so they are gathered from the whole capture before anything is written.
+        """
+        if data_type not in TABLE1_TYPES or len(payload) < 7 or payload[0] not in UPDATE_PARAM_COMMANDS:
+            return
+        if payload[1] in UPDATE_IDENTIFIERS and payload[2] == len(payload) - 3:
+            self.identifiers.setdefault(bytes(payload[3:]), b"0" * payload[2])
+
+    def sweep_identifiers(self, payload):
+        for value, placeholder in self.identifiers.items():
+            payload = payload.replace(value, placeholder)
+        return payload
+
     def track_info(self, payload):
-        """PLAY_*_PARAM track info: repeated <charset><length><text>."""
+        """PLAY_*_PARAM track info.
+
+        V2 packs the fields into one frame as repeated <charset><length><text>. V1 sends
+        one field per frame and says which it is first: <detail><charset><length><text>,
+        with detail 0, 1, 2 for track, album, artist. That length byte accounts for the
+        rest of the payload exactly, which is how the V1 form is told apart - read as V2,
+        it would pass for the first character of the text, and only that and the byte
+        after it would be replaced.
+        """
         if len(payload) < 2 or payload[1] != 0x01:
             return payload
+        if len(payload) >= 5 and payload[2] in (0x00, 0x01, 0x02) and payload[4] == len(payload) - 5:
+            # Replaced whatever it holds: V1 text is UTF-8 and need not be printable ASCII.
+            return payload[:5] + fit(TRACK_FIELDS[payload[2]], payload[4])
         out, index, field = bytearray(payload[:2]), 2, 0
         while index + 1 < len(payload):
             charset, length = payload[index], payload[index + 1]
@@ -123,6 +161,12 @@ class Scrubber:
             index += 2 + length
             field += 1
         return bytes(out) + payload[index:]
+
+    def ble_hash(self, payload):
+        """V1 COMMON_RET_BLUETOOTH_DEVICE_INFO BLE_HASH_VALUE: <type><length><text>."""
+        if len(payload) >= 3 and payload[1] == BLE_HASH_VALUE and payload[2] == len(payload) - 3:
+            return payload[:3] + b"0" * payload[2]
+        return payload
 
     def peripheral_list(self, payload):
         """PERI_*_PARAM device list: <address:17><4 bytes><namelength><name> per record."""
@@ -147,6 +191,7 @@ class Scrubber:
     def payload(self, data_type, payload):
         if not payload:
             return payload
+        payload = self.sweep_identifiers(payload)
         command = payload[0]
         if data_type in TABLE2_TYPES:
             if command in PERIPHERAL_PARAM_COMMANDS:
@@ -156,9 +201,18 @@ class Scrubber:
                 return self.track_info(payload)
             if command == CONNECT_RET_CAPABILITY_INFO and self.keep_device_address:
                 return payload
+            if command == COMMON_RET_BLUETOOTH_DEVICE_INFO:
+                return self.sweep_addresses(self.ble_hash(payload))
         # Anything else: still sweep for addresses, so an unmodelled frame that
         # happens to carry one does not slip through.
         return self.sweep_addresses(payload)
+
+    def gather(self, path):
+        try:
+            data_type, _, payload = unpack(open(path, "rb").read())
+        except FrameError:
+            return  # reported by the second pass
+        self.collect(data_type, payload)
 
     def file(self, path, dry_run):
         original = open(path, "rb").read()
@@ -186,19 +240,23 @@ def main():
     args = parser.parse_args()
 
     scrubber = Scrubber(keep_device_address=not args.scrub_device_address)
+    paths = [path for directory in args.directory
+             for path in sorted(glob.glob(os.path.join(directory, "*.bin")))]
+    for path in paths:
+        scrubber.gather(path)
     changed = failed = 0
-    for directory in args.directory:
-        for path in sorted(glob.glob(os.path.join(directory, "*.bin"))):
-            try:
-                if scrubber.file(path, args.dry_run):
-                    changed += 1
-                    verb = "would scrub" if args.dry_run else "scrubbed"
-                    print(f"{verb} {os.path.basename(path)}")
-            except FrameError as error:
-                failed += 1
-                print(f"skipped {os.path.basename(path)}: {error}", file=sys.stderr)
+    for path in paths:
+        try:
+            if scrubber.file(path, args.dry_run):
+                changed += 1
+                verb = "would scrub" if args.dry_run else "scrubbed"
+                print(f"{verb} {os.path.basename(path)}")
+        except FrameError as error:
+            failed += 1
+            print(f"skipped {os.path.basename(path)}: {error}", file=sys.stderr)
 
-    print(f"\n{changed} file(s) changed, {len(scrubber.addresses)} address(es) replaced")
+    print(f"\n{changed} file(s) changed, {len(scrubber.addresses)} address(es) and "
+          f"{len(scrubber.identifiers)} identifier(s) replaced")
     if failed:
         print(f"{failed} file(s) could not be read as a frame", file=sys.stderr)
     return 1 if failed else 0

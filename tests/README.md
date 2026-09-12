@@ -62,6 +62,9 @@ for a bug report; packet captures may contain private device information.
 A capture carries more than the protocol exchange. `PERI_*_PARAM` holds the
 paired device list - the names and addresses of every phone, laptop and car kit
 the headphones know about - and `PLAY_*_PARAM` holds whatever was playing.
+`UPDT_*_PARAM` holds the headset's serial number and its unique id for device
+binding, which a V1 device repeats elsewhere, and a V1 device also reports a BLE
+hash value in `COMMON_RET_BLUETOOTH_DEVICE_INFO`.
 
 ```sh
 tooling/scrub-capture.py --dry-run <capture-folder>   # report what would change
